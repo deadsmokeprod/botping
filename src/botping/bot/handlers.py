@@ -1,0 +1,429 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+from datetime import datetime, timedelta
+import httpx
+from aiogram import F, Router
+from aiogram.filters import Command, CommandObject, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import default_state
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
+
+from botping.bot import keyboards as kb
+from botping.bot.reports.build import build_availability_report_bundle
+from botping.bot.reports.period_parse import parse_period_line
+from botping.bot.settings_help import META, format_key_change_prompt
+from botping.bot.states import AddBotStates, QuietHoursStates, ReportStates, SettingStates
+from botping.bot.ui import edit_or_answer
+from botping.db import queries
+from botping.db.pool import Database
+from botping.monitor.checker import check_getme
+from botping.monitor.disk_guard import get_disk_info
+from botping.timeutil import now_moscow_naive
+
+logger = logging.getLogger(__name__)
+
+
+def _report_period_prompt_text() -> str:
+    return (
+        "📊 Отчёт Excel по доступности ботов\n\n"
+        "Отправьте одной строкой период «от — до»:\n"
+        "• 15.04.2026 по 20.04.2026\n"
+        "• 15042025 по 20042025 — формат ДДММГГГГ (8 цифр на дату)\n"
+        "• 150425 по 200425 — формат ДДММГГ (6 цифр, год 20ГГ)\n"
+        "Можно разделить запятой: 15042025,20042025\n\n"
+        "В файле: лист «Проверки» (каждый getMe), «Инциденты» (пересечение с периодом), "
+        "«Аудит настроек», «Боты», «Настройки сейчас», «Сводка» и «Легенда».\n\n"
+        "Лист «Проверки» — только строки за выбранный период. Если там пусто, "
+        "а мониторинг только начали — выберите даты, когда процесс уже крутился и боты включены; "
+        "на листе «Сводка» будет видно, за какой интервал вообще есть данные в базе.\n\n"
+        "Даты и время везде по Москве (UTC+3, Europe/Moscow)."
+    )
+
+
+def mask_token(token: str) -> str:
+    t = token.strip()
+    if len(t) <= 8:
+        return "***"
+    return f"{t[:4]}…{t[-4:]}"
+
+
+def _chunk_text(s: str, limit: int = 3900) -> list[str]:
+    if len(s) <= limit:
+        return [s]
+    parts: list[str] = []
+    cur = ""
+    for line in s.splitlines():
+        if len(cur) + len(line) + 1 > limit:
+            if cur:
+                parts.append(cur)
+            cur = line + "\n"
+        else:
+            cur += line + "\n"
+    if cur:
+        parts.append(cur)
+    return parts
+
+
+async def _format_status(db: Database) -> str:
+    bots = await queries.list_monitored_bots(db)
+    if not bots:
+        return "Нет ботов. Добавьте через «Боты» → «+ Добавить бота»."
+    lines: list[str] = []
+    for b in bots:
+        last = await queries.get_last_check(db, int(b["id"]))
+        inc = await queries.get_open_incident(db, int(b["id"]))
+        st = "выкл" if not b["enabled"] else "вкл"
+        if not last:
+            lines.append(f"- {b['display_name']} (id={b['id']}, {st}): проверок ещё не было")
+            continue
+        ok = "ok" if last["ok"] else "FAIL"
+        lat = last["latency_ms"] if last["latency_ms"] is not None else "?"
+        rl = " (rate_limit)" if last.get("rate_limited") else ""
+        inc_s = " ИНЦИДЕНТ" if inc else ""
+        err = f" — {last['error_text']}" if last["error_text"] else ""
+        lines.append(
+            f"- {b['display_name']} (id={b['id']}, {st}): {ok}{rl}, {last['ts']}, {lat}ms{err}{inc_s}"
+        )
+    info = get_disk_info(db.path)
+    ck_stats = await queries.get_checks_storage_stats(db)
+    lines.append("---")
+    lines.append(
+        f"Диск: {info.used_pct:.0f}% ({info.used_gb:.1f}/{info.total_gb:.1f} ГБ), "
+        f"БД: {info.db_size_mb:.1f} МБ, проверок: {ck_stats['count']}"
+    )
+    return "Статус:\n" + "\n".join(lines)
+
+
+async def _format_disk_detail(db: Database) -> str:
+    info = get_disk_info(db.path)
+    ck_stats = await queries.get_checks_storage_stats(db)
+    settings = await queries.load_all_settings(db)
+    threshold = settings["disk_usage_threshold_pct"]
+    return (
+        "Дисковое пространство:\n"
+        f"  Всего: {info.total_gb:.1f} ГБ\n"
+        f"  Занято: {info.used_gb:.1f} ГБ ({info.used_pct:.1f}%)\n"
+        f"  Свободно: {info.free_gb:.1f} ГБ\n"
+        f"  Порог очистки: {threshold}%\n"
+        f"\n"
+        f"База данных:\n"
+        f"  Размер файла: {info.db_size_mb:.1f} МБ\n"
+        f"  Строк проверок: {ck_stats['count']}\n"
+        f"  Самая старая: {ck_stats['min_ts'] or '—'}\n"
+        f"  Самая новая: {ck_stats['max_ts'] or '—'}"
+    )
+
+
+def setup_router() -> Router:
+    router = Router()
+
+    @router.message(Command("start"))
+    async def cmd_start(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await message.answer(
+            "Botping: мониторинг ваших ботов через getMe.\n"
+            "Команды: /status, /failures, /settings, /report\n"
+            "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
+            "Добавлять и включать/выключать ботов можно в меню «Боты».",
+            reply_markup=kb.main_menu(),
+        )
+
+    @router.message(Command("status"))
+    async def cmd_status(message: Message, db: Database) -> None:
+        await message.answer(await _format_status(db))
+
+    @router.message(Command("failures"))
+    async def cmd_failures(message: Message, command: CommandObject, db: Database) -> None:
+        text = await _failures_text(db, command.args)
+        for part in _chunk_text(text):
+            await message.answer(part)
+
+    @router.message(Command("settings"))
+    async def cmd_settings(message: Message) -> None:
+        await message.answer(
+            "Настройки мониторинга.\n"
+            "Выберите пункт — откроется описание, эталон и текущее значение; затем можно ввести новое.",
+            reply_markup=kb.settings_menu(),
+        )
+
+    @router.message(Command("report"))
+    async def cmd_report(message: Message, state: FSMContext) -> None:
+        await state.set_state(ReportStates.waiting_period)
+        await message.answer(_report_period_prompt_text(), reply_markup=kb.report_cancel_keyboard())
+
+    @router.callback_query(F.data == "menu:main")
+    async def on_menu_main(cq: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        await edit_or_answer(cq, "Главное меню:", reply_markup=kb.main_menu())
+        await cq.answer()
+
+    @router.callback_query(F.data == "menu:status")
+    async def on_menu_status(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+        await state.clear()
+        await edit_or_answer(cq, await _format_status(db), reply_markup=kb.main_menu())
+        await cq.answer()
+
+    @router.callback_query(F.data == "menu:failures")
+    async def on_menu_failures(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+        await state.clear()
+        t = await _failures_text(db, None)
+        await edit_or_answer(cq, t[:4090], reply_markup=kb.main_menu())
+        await cq.answer()
+
+    @router.callback_query(F.data == "menu:settings")
+    async def on_menu_settings(cq: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        await edit_or_answer(
+            cq,
+            "Настройки мониторинга.\n"
+            "Выберите пункт — откроется описание, эталон и текущее значение.",
+            reply_markup=kb.settings_menu(),
+        )
+        await cq.answer()
+
+    @router.callback_query(F.data == "menu:bots")
+    async def on_menu_bots(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+        await state.clear()
+        rows = await queries.list_monitored_bots(db)
+        bot_rows = [(int(b["id"]), str(b["display_name"]), bool(b["enabled"])) for b in rows]
+        await edit_or_answer(cq, "Мониторинг ботов:", reply_markup=kb.bots_menu(bot_rows))
+        await cq.answer()
+
+    @router.callback_query(F.data == "menu:disk")
+    async def on_menu_disk(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+        await state.clear()
+        await edit_or_answer(cq, await _format_disk_detail(db), reply_markup=kb.main_menu())
+        await cq.answer()
+
+    @router.callback_query(F.data == "menu:report_excel")
+    async def on_menu_report_excel(cq: CallbackQuery, state: FSMContext) -> None:
+        await state.set_state(ReportStates.waiting_period)
+        await cq.message.answer(_report_period_prompt_text(), reply_markup=kb.report_cancel_keyboard())
+        await cq.answer()
+
+    @router.callback_query(F.data == "report:cancel")
+    async def on_report_cancel(cq: CallbackQuery, state: FSMContext) -> None:
+        await state.clear()
+        await edit_or_answer(cq, "Главное меню:", reply_markup=kb.main_menu())
+        await cq.answer()
+
+    @router.message(ReportStates.waiting_period, F.text)
+    async def on_report_period(message: Message, state: FSMContext, db: Database) -> None:
+        try:
+            start, end = parse_period_line(message.text or "")
+        except ValueError as e:
+            await message.answer(str(e))
+            return
+        await message.answer("Собираю данные и формирую Excel…")
+        try:
+            bundle = await build_availability_report_bundle(db, start, end)
+            await message.answer_document(
+                BufferedInputFile(bundle.blob, filename=bundle.filename),
+                caption=bundle.caption,
+            )
+        except Exception as e:
+            logger.exception("excel report failed")
+            hint = str(e).strip()
+            if len(hint) > 280:
+                hint = hint[:277] + "…"
+            await message.answer(
+                "Не удалось сформировать файл.\n"
+                f"Текст ошибки: {hint}\n\n"
+                "Если это про даты — используйте формат как в примере: 15.04.2026 по 20.04.2026"
+            )
+            return
+        await state.clear()
+        await message.answer("Готово.", reply_markup=kb.main_menu())
+
+    @router.callback_query(F.data.startswith("set:"))
+    async def on_set_click(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+        key = cq.data.split(":", 1)[1]
+        if key not in META:
+            await cq.answer("Неизвестный параметр.", show_alert=True)
+            return
+        await state.update_data(set_key=key)
+        prompt = await format_key_change_prompt(db, key)
+        for part in _chunk_text(prompt, 4000):
+            await cq.message.answer(part)
+        if key == "quiet_hours":
+            await state.set_state(QuietHoursStates.waiting_json)
+        else:
+            await state.set_state(SettingStates.waiting_value)
+        await cq.answer()
+
+    @router.message(SettingStates.waiting_value, F.text)
+    async def on_setting_value(message: Message, state: FSMContext, db: Database) -> None:
+        data = await state.get_data()
+        key = str(data.get("set_key") or "")
+        if not key:
+            await state.clear()
+            await message.answer("Сессия сброшена. Откройте настройки снова.")
+            return
+        raw = (message.text or "").strip()
+        if not re.fullmatch(r"-?\d+", raw):
+            await message.answer("Нужно целое число. Повторите ввод или /settings.")
+            return
+        iv = int(raw)
+        if key == "daily_excel_report_enabled" and iv not in (0, 1):
+            await message.answer("Для этого параметра допустимо только 0 (выкл) или 1 (вкл).")
+            return
+        value = str(iv)
+        uid = message.from_user.id if message.from_user else 0
+        await queries.set_setting(db, key, value, admin_chat_id=uid)
+        await state.clear()
+        await message.answer(
+            f"Сохранено: {key} = {value}",
+            reply_markup=kb.settings_menu(),
+        )
+
+    @router.message(QuietHoursStates.waiting_json, F.text)
+    async def on_quiet_json(message: Message, state: FSMContext, db: Database) -> None:
+        raw = (message.text or "").strip()
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            await message.answer("Невалидный JSON. Повторите или отправьте {}")
+            return
+        if obj != {} and not isinstance(obj, dict):
+            await message.answer("Нужен объект JSON или {}.")
+            return
+        uid = message.from_user.id if message.from_user else 0
+        await queries.set_setting(db, "quiet_hours", json.dumps(obj, ensure_ascii=False), admin_chat_id=uid)
+        await state.clear()
+        await message.answer("Тихие часы обновлены.", reply_markup=kb.settings_menu())
+
+    @router.callback_query(F.data.startswith("bot:view:"))
+    async def on_bot_view(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        b = await queries.get_monitored_bot(db, bid)
+        if not b:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        token_m = mask_token(str(b["token"]))
+        en = bool(b["enabled"])
+        await edit_or_answer(
+            cq,
+            f"Бот: {b['display_name']}\nid={bid}\nТокен: {token_m}\nСтатус: {'вкл' if en else 'выкл'}",
+            reply_markup=kb.bot_detail(bid, en),
+        )
+        await cq.answer()
+
+    @router.callback_query(F.data.startswith("bot:toggle:"))
+    async def on_bot_toggle(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        b = await queries.get_monitored_bot(db, bid)
+        if not b:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        new_en = not bool(b["enabled"])
+        await queries.update_bot_enabled(db, bid, new_en)
+        b2 = await queries.get_monitored_bot(db, bid)
+        assert b2 is not None
+        await edit_or_answer(
+            cq,
+            f"Бот: {b2['display_name']}\nid={bid}\nТокен: {mask_token(str(b2['token']))}\nСтатус: {'вкл' if b2['enabled'] else 'выкл'}",
+            reply_markup=kb.bot_detail(bid, bool(b2["enabled"])),
+        )
+        await cq.answer()
+
+    @router.callback_query(F.data.startswith("bot:delask:"))
+    async def on_bot_delask(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        b = await queries.get_monitored_bot(db, bid)
+        if not b:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        await edit_or_answer(
+            cq,
+            f"Удалить бота «{b['display_name']}» (id={bid})?",
+            reply_markup=kb.confirm_delete(bid),
+        )
+        await cq.answer()
+
+    @router.callback_query(F.data.startswith("bot:del:"))
+    async def on_bot_del(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        await queries.delete_monitored_bot(db, bid)
+        rows = await queries.list_monitored_bots(db)
+        bot_rows = [(int(b["id"]), str(b["display_name"]), bool(b["enabled"])) for b in rows]
+        await edit_or_answer(cq, "Бот удалён. Список:", reply_markup=kb.bots_menu(bot_rows))
+        await cq.answer()
+
+    @router.callback_query(F.data == "bot:add")
+    async def on_bot_add(cq: CallbackQuery, state: FSMContext) -> None:
+        await state.set_state(AddBotStates.waiting_name)
+        await cq.message.answer("Введите отображаемое имя бота (как в списке).")
+        await cq.answer()
+
+    @router.message(AddBotStates.waiting_name, F.text)
+    async def on_add_name(message: Message, state: FSMContext) -> None:
+        name = (message.text or "").strip()
+        if not name:
+            await message.answer("Имя не может быть пустым.")
+            return
+        await state.update_data(new_bot_name=name)
+        await state.set_state(AddBotStates.waiting_token)
+        await message.answer("Отправьте токен бота (из @BotFather). Сообщение можно удалить после добавления.")
+
+    @router.message(AddBotStates.waiting_token, F.text)
+    async def on_add_token(message: Message, state: FSMContext, db: Database) -> None:
+        token = (message.text or "").strip()
+        data = await state.get_data()
+        name = str(data.get("new_bot_name") or "").strip()
+        if not token or not name:
+            await state.clear()
+            await message.answer("Сессия сброшена. Начните снова: Боты → + Добавить.")
+            return
+        timeout = (await queries.load_all_settings(db))["request_timeout_sec"]
+        async with httpx.AsyncClient() as client:
+            res = await check_getme(client, token, float(timeout))
+        if not res.ok:
+            await message.answer(
+                f"Токен не прошёл getMe: {res.error_text}. Проверьте токен и попробуйте снова."
+            )
+            return
+        new_id = await queries.insert_monitored_bot(db, name, token)
+        await state.clear()
+        await message.answer(
+            f"Бот добавлен: {name} (id={new_id}). Мониторинг начнётся на следующем цикле.",
+            reply_markup=kb.main_menu(),
+        )
+
+    @router.message(StateFilter(default_state), F.text, ~F.text.startswith("/"))
+    async def fallback_plain(message: Message) -> None:
+        await message.answer(
+            "Напишите /start — откроется меню.\n"
+            "Команды: /status, /failures, /settings"
+        )
+
+    return router
+
+
+async def _failures_text(db: Database, args: str | None) -> str:
+    end = now_moscow_naive().replace(microsecond=0)
+    start = (now_moscow_naive() - timedelta(days=7)).replace(microsecond=0)
+    if args:
+        parts = args.split()
+        if len(parts) >= 2:
+            try:
+                d0 = datetime.strptime(parts[0], "%Y-%m-%d")
+                d1 = datetime.strptime(parts[1], "%Y-%m-%d")
+                start = d0
+                end = d1.replace(hour=23, minute=59, second=59)
+            except ValueError:
+                return "Формат: /failures или /failures 2026-04-01 2026-04-14"
+    start_s = start.strftime("%Y-%m-%d %H:%M:%S")
+    end_s = end.strftime("%Y-%m-%d %H:%M:%S")
+    items = await queries.list_incidents_in_range(db, start_s, end_s)
+    if not items:
+        return f"Сбоев за период {start_s} — {end_s} не найдено."
+    lines = [f"Инциденты ({start_s} — {end_s}):", ""]
+    for it in items:
+        ended = it["ended_at"] or "открыт"
+        lines.append(
+            f"- {it['display_name']} (bot_id={it['bot_id']}): {it['started_at']} → {ended}\n  {it['last_error']}"
+        )
+    return "\n".join(lines)

@@ -1,0 +1,11 @@
+services:
+  botping:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - botping_data:/app/data
+
+volumes:
+  botping_data:
