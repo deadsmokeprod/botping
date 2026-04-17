@@ -22,3 +22,7 @@ botping = "botping.main:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Include SQL schema in wheel/sdist and pip install (Docker uses pip install .)
+[tool.setuptools.package-data]
+"botping.db" = ["*.sql"]
