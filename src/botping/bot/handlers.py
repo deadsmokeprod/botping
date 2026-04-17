@@ -20,6 +20,7 @@ from botping.bot.states import AddBotStates, QuietHoursStates, ReportStates, Set
 from botping.bot.ui import edit_or_answer
 from botping.db import queries
 from botping.db.pool import Database, generate_heartbeat_secret
+from botping.heartbeat_server import HeartbeatServer
 from botping.monitor.checker import check_getme
 from botping.monitor.disk_guard import get_disk_info
 from botping.timeutil import MOSCOW_TZ, now_moscow_naive
@@ -137,7 +138,7 @@ def _chunk_text(s: str, limit: int = 3900) -> list[str]:
     return parts
 
 
-async def _format_status(db: Database) -> str:
+async def _format_status(db: Database, hb_server: HeartbeatServer | None = None) -> str:
     bots = await queries.list_monitored_bots(db)
     settings = await queries.load_all_settings(db)
     hb_timeout = int(settings["heartbeat_timeout_sec"])
@@ -180,6 +181,18 @@ async def _format_status(db: Database) -> str:
         lines.append(tg_line)
     else:
         lines.append("Telegram API: проверка отключена (telegram_api_probe_enabled=0)")
+
+    if hb_server is not None:
+        try:
+            st = hb_server.stats_snapshot()
+            lines.append(
+                f"Heartbeat защита: активных банов {st['active_bans']}, "
+                f"заблокировано за сутки {st['blocked_24h']}"
+            )
+        except Exception:
+            lines.append("Heartbeat защита: н/д")
+    else:
+        lines.append("Heartbeat защита: н/д")
 
     info = get_disk_info(db.path)
     ck_stats = await queries.get_checks_storage_stats(db)
@@ -227,8 +240,10 @@ def setup_router() -> Router:
         )
 
     @router.message(Command("status"))
-    async def cmd_status(message: Message, db: Database) -> None:
-        await message.answer(await _format_status(db))
+    async def cmd_status(
+        message: Message, db: Database, hb_server: HeartbeatServer | None = None
+    ) -> None:
+        await message.answer(await _format_status(db, hb_server))
 
     @router.message(Command("failures"))
     async def cmd_failures(message: Message, command: CommandObject, db: Database) -> None:
@@ -256,9 +271,16 @@ def setup_router() -> Router:
         await cq.answer()
 
     @router.callback_query(F.data == "menu:status")
-    async def on_menu_status(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+    async def on_menu_status(
+        cq: CallbackQuery,
+        state: FSMContext,
+        db: Database,
+        hb_server: HeartbeatServer | None = None,
+    ) -> None:
         await state.clear()
-        await edit_or_answer(cq, await _format_status(db), reply_markup=kb.main_menu())
+        await edit_or_answer(
+            cq, await _format_status(db, hb_server), reply_markup=kb.main_menu()
+        )
         await cq.answer()
 
     @router.callback_query(F.data == "menu:failures")

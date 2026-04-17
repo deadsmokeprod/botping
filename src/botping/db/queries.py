@@ -23,6 +23,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "telegram_api_probe_enabled": "1",
     "heartbeat_timeout_sec": "120",
     "heartbeat_port": "8080",
+    "heartbeat_unauth_rate_per_min": "10",
+    "heartbeat_ban_fails_threshold": "6",
+    "heartbeat_ban_duration_min": "15",
 }
 
 
@@ -134,6 +137,15 @@ async def regenerate_heartbeat_secret(db: Database, bot_id: int, new_secret: str
         "UPDATE monitored_bots SET heartbeat_secret = ? WHERE id = ?",
         (new_secret, bot_id),
     )
+
+
+async def list_heartbeat_secrets(db: Database) -> list[tuple[int, str]]:
+    """Пары (bot_id, secret) для in-memory кэша в heartbeat-сервере.
+    Токены не тянем — они не нужны для проверки пинга."""
+    rows = await db.fetchall(
+        "SELECT id, heartbeat_secret FROM monitored_bots WHERE heartbeat_secret IS NOT NULL AND heartbeat_secret != ''"
+    )
+    return [(int(r[0]), str(r[1])) for r in rows]
 
 
 async def update_bot_enabled(db: Database, bot_id: int, enabled: bool) -> None:
@@ -609,6 +621,15 @@ def parse_settings_row(settings: dict[str, str]) -> dict[str, Any]:
     out["telegram_api_probe_enabled"] = tp == "1"
     out["heartbeat_timeout_sec"] = max(30, int(settings.get("heartbeat_timeout_sec", "120")))
     out["heartbeat_port"] = max(1, min(65535, int(settings.get("heartbeat_port", "8080"))))
+    out["heartbeat_unauth_rate_per_min"] = max(
+        1, int(settings.get("heartbeat_unauth_rate_per_min", "10"))
+    )
+    out["heartbeat_ban_fails_threshold"] = max(
+        1, int(settings.get("heartbeat_ban_fails_threshold", "6"))
+    )
+    out["heartbeat_ban_duration_min"] = max(
+        1, min(1440, int(settings.get("heartbeat_ban_duration_min", "15")))
+    )
     return out
 
 

@@ -58,6 +58,24 @@ def settings_menu() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    text="Лимит чужих запросов/мин",
+                    callback_data="set:heartbeat_unauth_rate_per_min",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Порог неудач до бана",
+                    callback_data="set:heartbeat_ban_fails_threshold",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="Длительность бана (мин)",
+                    callback_data="set:heartbeat_ban_duration_min",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="Проверка Telegram API (0/1)",
                     callback_data="set:telegram_api_probe_enabled",
                 )

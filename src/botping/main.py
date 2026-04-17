@@ -58,7 +58,7 @@ async def _amain() -> None:
     dp.include_router(setup_router())
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, hb_server=hb_server)
     finally:
         stop.set()
         sched_task.cancel()
