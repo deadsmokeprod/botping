@@ -11,6 +11,7 @@ from openpyxl.utils import get_column_letter
 THIN = Side(style="thin", color="CCCCCC")
 HEADER_FONT = Font(bold=True, size=11)
 HEADER_FILL = PatternFill("solid", fgColor="E8EEF7")
+TITLE_FONT = Font(bold=True, size=13)
 WRAP = Alignment(wrap_text=True, vertical="top")
 
 
@@ -23,7 +24,7 @@ def _style_header(ws, row: int, ncols: int) -> None:
         c.alignment = Alignment(vertical="center", wrap_text=True)
 
 
-def _autosize(ws, max_width: int = 48) -> None:
+def _autosize(ws, max_width: int = 56) -> None:
     for col in ws.columns:
         cells = [c for c in col]
         if not cells:
@@ -31,6 +32,48 @@ def _autosize(ws, max_width: int = 48) -> None:
         letter = get_column_letter(cells[0].column)
         length = max((len(str(c.value or "")) for c in cells), default=0)
         ws.column_dimensions[letter].width = min(max_width, max(10, length + 2))
+
+
+def _parse_ts(s: str | None) -> datetime | None:
+    if not s:
+        return None
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _format_minutes(total_sec: float) -> str:
+    m = int(total_sec // 60)
+    if m >= 60:
+        h = m // 60
+        rem = m % 60
+        return f"{h} ч {rem} мин" if rem else f"{h} ч"
+    s = int(total_sec) % 60
+    if m == 0:
+        return f"{s} с"
+    return f"{m} мин {s} с" if s else f"{m} мин"
+
+
+def _incident_duration_sec(
+    inc: dict[str, Any], period_end: datetime, generated_at: datetime
+) -> float:
+    start = _parse_ts(str(inc["started_at"]))
+    if start is None:
+        return 0.0
+    end_raw = inc.get("ended_at")
+    if end_raw:
+        end = _parse_ts(str(end_raw)) or period_end
+    else:
+        # открытый инцидент — считаем до момента формирования отчёта
+        end = generated_at
+    return max(0.0, (end - start).total_seconds())
+
+
+def _bot_status_text(ok: bool, error: str) -> str:
+    if ok:
+        return "Живой"
+    return "Недоступен"
 
 
 def build_availability_report(
@@ -56,239 +99,211 @@ def build_availability_report(
 ) -> bytes:
     telegram_checks = telegram_checks or []
     telegram_incidents = telegram_incidents or []
+
     wb = Workbook()
-    # --- Сводка ---
+
+    # =========================================================================
+    # Сводка — человеко-читаемое резюме
+    # =========================================================================
     ws0 = wb.active
     ws0.title = "Сводка"
-    ws0.append(["Отчёт Botping — доступность ботов"])
+    ws0.cell(row=1, column=1, value="Отчёт Botping — доступность ботов").font = TITLE_FONT
     ws0.append([])
     ws0.append(["Период с", period_start.strftime("%d.%m.%Y %H:%M:%S")])
     ws0.append(["Период по", period_end.strftime("%d.%m.%Y %H:%M:%S")])
     ws0.append(["Сформирован", generated_at.strftime("%d.%m.%Y %H:%M:%S")])
     ws0.append([])
-    ws0.append(["Проверок в базе всего (за всё время)", checks_total_in_db])
-    ws0.append(["Самая ранняя метка времени в таблице checks", checks_db_min_ts or "—"])
-    ws0.append(["Самая поздняя метка времени в таблице checks", checks_db_max_ts or "—"])
+
+    # Человеко-читаемое резюме
+    total_downtime_per_bot: dict[int, float] = {}
+    longest_inc: dict[str, Any] | None = None
+    longest_dur = 0.0
+    for inc in incidents:
+        d = _incident_duration_sec(inc, period_end, generated_at)
+        bid = int(inc["bot_id"])
+        total_downtime_per_bot[bid] = total_downtime_per_bot.get(bid, 0.0) + d
+        if d > longest_dur:
+            longest_dur = d
+            longest_inc = inc
+
+    total_downtime = sum(total_downtime_per_bot.values())
+    tg_downtime = sum(
+        _incident_duration_sec(x, period_end, generated_at) for x in telegram_incidents
+    )
+
+    ws0.cell(row=ws0.max_row + 1, column=1, value="Итоги периода (коротко)").font = TITLE_FONT
     ws0.append([])
-    ws0.append(
-        [
-            "Почему лист «Проверки» может быть пустым",
-            "В лист попадают только строки за выбранный период (сравнение по тем же строкам времени, что в БД — время Москвы). "
-            "Если в интервале выше нет совпадений — период отчёта не пересекается с тем, когда реально шёл опрос "
-            "(сервис был выключен, боты выключены, выбраны другие даты/год). "
-            "Строки появляются только пока работает процесс мониторинга и есть включённые боты.",
-        ]
-    )
+    ws0.append([
+        "Суммарная недоступность всех ботов",
+        _format_minutes(total_downtime) if total_downtime else "ноль — инцидентов не было",
+    ])
+    ws0.append([
+        "Самый длинный инцидент",
+        (
+            f"{longest_inc['display_name']} (id={longest_inc['bot_id']}): "
+            f"с {longest_inc['started_at']} по {longest_inc['ended_at'] or 'сейчас'}, "
+            f"длительность {_format_minutes(longest_dur)}"
+        )
+        if longest_inc
+        else "—",
+    ])
+    ws0.append([
+        "Недоступность Telegram API (сумма)",
+        _format_minutes(tg_downtime) if tg_downtime else "ноль — Telegram API был доступен всё время",
+    ])
+
+    if total_downtime_per_bot:
+        ws0.append([])
+        ws0.cell(row=ws0.max_row + 1, column=1, value="Недоступность по каждому боту").font = TITLE_FONT
+        ws0.append([])
+        name_by_id = {int(b["id"]): b["display_name"] for b in bots}
+        for bid, dur in sorted(total_downtime_per_bot.items(), key=lambda x: -x[1]):
+            ws0.append([
+                f"{name_by_id.get(bid, '?')} (id={bid})",
+                _format_minutes(dur),
+            ])
+
     ws0.append([])
-    ws0.append(
-        [
-            "Лист «Проверки»",
-            "каждая строка — один per-bot зонд (getUpdates, 409 Conflict = бот реально поллит). "
-            "Исторические строки до миграции имеют тип 'getme'.",
-        ]
-    )
-    ws0.append(["Лист «Инциденты»", "эпизоды недоступности ботов, пересекающие выбранный период"])
-    ws0.append(
-        [
-            "Лист «Telegram API»",
-            "вторичная проверка: каждая строка — один getMe к admin-боту для глобальной доступности Telegram API",
-        ]
-    )
-    ws0.append(
-        [
-            "Лист «Инциденты Telegram API»",
-            "эпизоды недоступности самого Telegram API с VPS Botping, пересекающие выбранный период",
-        ]
-    )
-    ws0.append(["Лист «Боты»", "снимок списка мониторинга на момент отчёта"])
-    ws0.append(["Лист «Аудит настроек»", "кто и когда менял параметры (если были изменения в периоде)"])
+    ws0.cell(row=ws0.max_row + 1, column=1, value="Что на каждом листе").font = TITLE_FONT
     ws0.append([])
+    ws0.append([
+        "Лист «Проверки»",
+        "каждая строка — одна оценка бота (раз в интервал проверки). "
+        "Столбец «Статус» — «Живой» или «Недоступен» по свежести heartbeat.",
+    ])
+    ws0.append([
+        "Лист «Инциденты»",
+        "эпизоды, когда бот был недоступен несколько проверок подряд и был открыт инцидент. "
+        "Есть колонка «Длительность».",
+    ])
+    ws0.append([
+        "Лист «Telegram API»",
+        "каждая строка — одна проверка самого Telegram API с VPS Botping (getMe к admin-боту).",
+    ])
+    ws0.append([
+        "Лист «Инциденты Telegram API»",
+        "когда с VPS не получалось достучаться до api.telegram.org.",
+    ])
+    ws0.append(["Лист «Боты»", "снимок списка мониторинга на момент отчёта, включая heartbeat URL и маску секрета."])
+    ws0.append(["Лист «Аудит настроек»", "кто и когда менял параметры через Telegram."])
+    ws0.append(["Лист «Настройки сейчас»", "снимок всех ключей из таблицы settings."])
+    ws0.append(["Лист «Легенда»", "словарь терминов."])
+
+    ws0.append([])
+    ws0.append(["Строк проверок в периоде", f"{len(checks)}{' (обрезано)' if checks_truncated else ''}"])
+    ws0.append(["Строк инцидентов", f"{len(incidents)}{' (обрезано)' if incidents_truncated else ''}"])
+    ws0.append([
+        "Строк проверок Telegram API",
+        f"{len(telegram_checks)}{' (обрезано)' if telegram_checks_truncated else ''}",
+    ])
+    ws0.append([
+        "Строк инцидентов Telegram API",
+        f"{len(telegram_incidents)}{' (обрезано)' if telegram_incidents_truncated else ''}",
+    ])
+    ws0.append(["Строк аудита", f"{len(audit)}{' (обрезано)' if audit_truncated else ''}"])
     ws0.append(["Количество ботов (всего)", len(bots)])
-    ws0.append(
-        [
-            "Строк проверок в периоде",
-            f"{len(checks)}{' (обрезано по лимиту)' if checks_truncated else ''}",
-        ]
-    )
-    ws0.append(
-        [
-            "Строк инцидентов",
-            f"{len(incidents)}{' (обрезано)' if incidents_truncated else ''}",
-        ]
-    )
-    ws0.append(
-        [
-            "Строк Telegram API проверок",
-            f"{len(telegram_checks)}{' (обрезано)' if telegram_checks_truncated else ''}",
-        ]
-    )
-    ws0.append(
-        [
-            "Строк инцидентов Telegram API",
-            f"{len(telegram_incidents)}{' (обрезано)' if telegram_incidents_truncated else ''}",
-        ]
-    )
-    ws0.append(
-        ["Строк аудита", f"{len(audit)}{' (обрезано)' if audit_truncated else ''}"]
-    )
-    ws0.column_dimensions["A"].width = 28
+    ws0.append([])
+    ws0.append(["Проверок в базе всего", checks_total_in_db])
+    ws0.append(["Самая ранняя метка в БД", checks_db_min_ts or "—"])
+    ws0.append(["Самая поздняя метка в БД", checks_db_max_ts or "—"])
+
+    ws0.column_dimensions["A"].width = 40
     ws0.column_dimensions["B"].width = 80
 
-    # --- Боты ---
+    # =========================================================================
+    # Боты
+    # =========================================================================
     wsb = wb.create_sheet("Боты")
-    wsb.append(
-        [
-            "ID",
-            "Имя в мониторинге",
-            "Включён (1 да / 0 нет)",
-            "Создан в БД (Москва)",
-            "Примечание",
-        ]
-    )
-    _style_header(wsb, 1, 5)
+    wsb.append([
+        "ID",
+        "Имя в мониторинге",
+        "Включён",
+        "Создан в БД (Москва)",
+        "Последний heartbeat",
+        "С IP",
+        "Секрет (маска)",
+        "Примечание",
+    ])
+    _style_header(wsb, 1, 8)
     for b in bots:
-        wsb.append(
-            [
-                b["id"],
-                b["display_name"],
-                1 if b["enabled"] else 0,
-                b["created_at"],
-                "Токен в отчёт не выводится из соображений безопасности",
-            ]
-        )
-    for row in wsb.iter_rows(min_row=2, max_row=wsb.max_row, min_col=1, max_col=5):
+        sec = str(b.get("heartbeat_secret") or "")
+        sec_mask = f"{sec[:4]}…{sec[-4:]}" if len(sec) > 8 else "***"
+        wsb.append([
+            b["id"],
+            b["display_name"],
+            "да" if b["enabled"] else "нет",
+            b["created_at"],
+            b.get("last_heartbeat_at") or "—",
+            b.get("last_heartbeat_ip") or "—",
+            sec_mask if sec else "—",
+            "Токен и полный секрет в отчёт не выводятся",
+        ])
+    for row in wsb.iter_rows(min_row=2, max_row=wsb.max_row, min_col=1, max_col=8):
         for c in row:
             c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
             c.alignment = WRAP
     _autosize(wsb)
 
-    # --- Проверки ---
+    # =========================================================================
+    # Проверки (per-bot)
+    # =========================================================================
     wsc = wb.create_sheet("Проверки")
-    wsc.append(
-        [
-            "ID проверки",
-            "ID бота",
-            "Имя бота",
-            "Время (Москва)",
-            "Успех (1 да / 0 нет)",
-            "Задержка мс",
-            "HTTP статус",
-            "Текст ошибки",
-            "Rate limit (1 да)",
-            "Тип проверки",
-        ]
-    )
-    _style_header(wsc, 1, 10)
+    wsc.append([
+        "Время (Москва)",
+        "Бот",
+        "Статус",
+        "Прошло с последнего пинга",
+        "Примечание",
+        "Тип проверки",
+    ])
+    _style_header(wsc, 1, 6)
     for r in checks:
-        wsc.append(
-            [
-                r["id"],
-                r["bot_id"],
-                r["display_name"],
-                r["ts"],
-                1 if r["ok"] else 0,
-                r["latency_ms"] if r["latency_ms"] is not None else "",
-                r["http_status"] if r["http_status"] is not None else "",
-                r["error_text"] or "",
-                1 if r["rate_limited"] else 0,
-                r.get("check_type") or "getupdates",
-            ]
-        )
-    for row in wsc.iter_rows(min_row=2, max_row=wsc.max_row, min_col=1, max_col=10):
+        lat_ms = r.get("latency_ms")
+        if lat_ms is None:
+            age_text = "нет данных"
+        else:
+            age_text = _format_minutes(int(lat_ms) / 1000.0)
+        status = _bot_status_text(bool(r["ok"]), r.get("error_text") or "")
+        wsc.append([
+            r["ts"],
+            r["display_name"],
+            status,
+            age_text,
+            r.get("error_text") or "",
+            r.get("check_type") or "heartbeat",
+        ])
+    for row in wsc.iter_rows(min_row=2, max_row=wsc.max_row, min_col=1, max_col=6):
         for c in row:
             c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
             c.alignment = WRAP
     wsc.freeze_panes = "A2"
-    _autosize(wsc, max_width=56)
+    _autosize(wsc)
 
-    # --- Telegram API (глобальная вторичная проверка) ---
-    wst = wb.create_sheet("Telegram API")
-    wst.append(
-        [
-            "ID проверки",
-            "Время (Москва)",
-            "Успех (1 да / 0 нет)",
-            "Задержка мс",
-            "HTTP статус",
-            "Текст ошибки",
-            "Rate limit (1 да)",
-        ]
-    )
-    _style_header(wst, 1, 7)
-    for r in telegram_checks:
-        wst.append(
-            [
-                r["id"],
-                r["ts"],
-                1 if r["ok"] else 0,
-                r["latency_ms"] if r["latency_ms"] is not None else "",
-                r["http_status"] if r["http_status"] is not None else "",
-                r["error_text"] or "",
-                1 if r["rate_limited"] else 0,
-            ]
-        )
-    for row in wst.iter_rows(min_row=2, max_row=wst.max_row, min_col=1, max_col=7):
-        for c in row:
-            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-            c.alignment = WRAP
-    wst.freeze_panes = "A2"
-    _autosize(wst, max_width=56)
-
-    # --- Инциденты Telegram API ---
-    wsti = wb.create_sheet("Инциденты Telegram API")
-    wsti.append(
-        [
-            "ID инцидента",
-            "Начало (Москва)",
-            "Окончание (Москва, пусто = ещё открыт)",
-            "Последняя ошибка",
-            "Последний алерт (Москва)",
-        ]
-    )
-    _style_header(wsti, 1, 5)
-    for r in telegram_incidents:
-        wsti.append(
-            [
-                r["id"],
-                r["started_at"],
-                r["ended_at"] or "",
-                r["last_error"] or "",
-                r.get("last_alert_at") or "",
-            ]
-        )
-    for row in wsti.iter_rows(min_row=2, max_row=wsti.max_row, min_col=1, max_col=5):
-        for c in row:
-            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-            c.alignment = WRAP
-    wsti.freeze_panes = "A2"
-    _autosize(wsti)
-
-    # --- Инциденты ---
+    # =========================================================================
+    # Инциденты ботов
+    # =========================================================================
     wsi = wb.create_sheet("Инциденты")
-    wsi.append(
-        [
-            "ID инцидента",
-            "ID бота",
-            "Имя бота",
-            "Начало (Москва)",
-            "Окончание (Москва, пусто = ещё открыт)",
-            "Последняя ошибка в проверке",
-            "Последний алерт (Москва)",
-        ]
-    )
+    wsi.append([
+        "ID инцидента",
+        "Бот",
+        "Начало (Москва)",
+        "Конец (пусто = ещё открыт)",
+        "Длительность",
+        "Последняя ошибка",
+        "Последний алерт",
+    ])
     _style_header(wsi, 1, 7)
     for r in incidents:
-        wsi.append(
-            [
-                r["id"],
-                r["bot_id"],
-                r["display_name"],
-                r["started_at"],
-                r["ended_at"] or "",
-                r["last_error"] or "",
-                r.get("last_alert_at") or "",
-            ]
-        )
+        dur = _incident_duration_sec(r, period_end, generated_at)
+        wsi.append([
+            r["id"],
+            r["display_name"],
+            r["started_at"],
+            r["ended_at"] or "",
+            _format_minutes(dur),
+            r["last_error"] or "",
+            r.get("last_alert_at") or "",
+        ])
     for row in wsi.iter_rows(min_row=2, max_row=wsi.max_row, min_col=1, max_col=7):
         for c in row:
             c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -296,7 +311,68 @@ def build_availability_report(
     wsi.freeze_panes = "A2"
     _autosize(wsi)
 
-    # --- Аудит настроек ---
+    # =========================================================================
+    # Telegram API
+    # =========================================================================
+    wst = wb.create_sheet("Telegram API")
+    wst.append([
+        "Время (Москва)",
+        "Статус",
+        "Задержка мс",
+        "HTTP",
+        "Ошибка",
+        "Rate limit",
+    ])
+    _style_header(wst, 1, 6)
+    for r in telegram_checks:
+        wst.append([
+            r["ts"],
+            "Доступен" if r["ok"] else "Недоступен",
+            r["latency_ms"] if r["latency_ms"] is not None else "",
+            r["http_status"] if r["http_status"] is not None else "",
+            r["error_text"] or "",
+            "да" if r["rate_limited"] else "",
+        ])
+    for row in wst.iter_rows(min_row=2, max_row=wst.max_row, min_col=1, max_col=6):
+        for c in row:
+            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+            c.alignment = WRAP
+    wst.freeze_panes = "A2"
+    _autosize(wst)
+
+    # =========================================================================
+    # Инциденты Telegram API
+    # =========================================================================
+    wsti = wb.create_sheet("Инциденты Telegram API")
+    wsti.append([
+        "ID",
+        "Начало (Москва)",
+        "Конец (пусто = ещё открыт)",
+        "Длительность",
+        "Последняя ошибка",
+        "Последний алерт",
+    ])
+    _style_header(wsti, 1, 6)
+    for r in telegram_incidents:
+        dur = _incident_duration_sec(r, period_end, generated_at)
+        wsti.append([
+            r["id"],
+            r["started_at"],
+            r["ended_at"] or "",
+            _format_minutes(dur),
+            r["last_error"] or "",
+            r.get("last_alert_at") or "",
+        ])
+    for row in wsti.iter_rows(min_row=2, max_row=wsti.max_row, min_col=1, max_col=6):
+        for c in row:
+            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+            c.alignment = WRAP
+    wsti.freeze_panes = "A2"
+    _autosize(wsti)
+
+    # =========================================================================
+    # Аудит настроек
+    # =========================================================================
     wsa = wb.create_sheet("Аудит настроек")
     wsa.append(["Время (Москва)", "ID админа Telegram", "Параметр", "Было", "Стало"])
     _style_header(wsa, 1, 5)
@@ -309,7 +385,9 @@ def build_availability_report(
     wsa.freeze_panes = "A2"
     _autosize(wsa)
 
-    # --- Текущие настройки ---
+    # =========================================================================
+    # Настройки сейчас
+    # =========================================================================
     wss = wb.create_sheet("Настройки сейчас")
     wss.append(["Ключ", "Значение в БД"])
     _style_header(wss, 1, 2)
@@ -321,40 +399,55 @@ def build_availability_report(
             c.alignment = WRAP
     _autosize(wss)
 
-    # --- Легенда ---
+    # =========================================================================
+    # Легенда
+    # =========================================================================
     wsl = wb.create_sheet("Легенда")
     legend = [
         (
-            "Проверки",
-            "Основной per-bot зонд. Каждая строка — один getUpdates (POST, timeout=0, offset=-1, limit=1). "
-            "HTTP 409 Conflict → бот реально ведёт long-poll (ok=1). "
-            "HTTP 200 ok=true → никто не поллит, бот считается недоступным (ok=0). "
-            "Сетевая ошибка/5xx → Telegram API сам недоступен с VPS Botping — ok=0, но счётчик падений бота не растёт.",
+            "Как работает мониторинг",
+            "Каждый ваш бот сам раз в ~30 секунд шлёт короткий HTTP-запрос на Botping "
+            "(heartbeat). Botping на каждом тике смотрит, насколько свеж последний пинг: "
+            "если он старше таймаута — бот считается недоступным.",
         ),
-        ("Тип проверки", "'getupdates' — новый per-bot зонд; 'getme' — исторические строки до миграции."),
-        ("Успех", "1 = бот жив в момент проверки; 0 = не жив либо Telegram недоступен."),
-        ("Задержка мс", "Время ответа зонда (для анализа деградации сети)."),
-        ("HTTP статус", "Код ответа HTTP; может быть пусто при таймауте/сетевой ошибке."),
-        ("Текст ошибки", "Краткое описание от Telegram или timeout/invalid_json/имя исключения."),
-        ("Rate limit", "1 если Telegram вернул 429 — в логике мониторинга не увеличивает счётчик падений."),
-        ("Инциденты", "Период, когда per-bot зонд стабильно говорил «не поллит» (порог подряд неудач), до восстановления."),
+        ("Живой", "От бота пришёл хотя бы один heartbeat не позже, чем разрешено таймаутом."),
+        (
+            "Недоступен",
+            "Бот не пингует Botping дольше таймаута. Обычные причины: процесс остановлен, "
+            "у сервера бота нет интернета, сломан сниппет или неправильный секрет.",
+        ),
+        (
+            "Прошло с последнего пинга",
+            "Возраст самого свежего heartbeat на момент проверки. Для живого бота — "
+            "обычно меньше таймаута.",
+        ),
+        (
+            "Инцидент",
+            "Период, когда бот подряд несколько тиков был «Недоступен» и превысил порог "
+            "fail_threshold. Длительность считается от «Начало» до «Конец» (для открытых — "
+            "до момента формирования отчёта).",
+        ),
         (
             "Telegram API",
-            "Вторичная проверка: раз в тик один getMe к admin-боту. Её падения НЕ открывают per-bot инцидент, "
-            "а отражают глобальную проблему со связью VPS Botping ↔ Telegram.",
+            "Отдельная проверка: раз в тик Botping делает getMe своим токеном админ-бота. "
+            "Если не ответил — значит с VPS Botping проблема со связью с Telegram. "
+            "Это НЕ то же самое, что «бот недоступен».",
         ),
         (
-            "Инциденты Telegram API",
-            "Период, когда с VPS Botping не удавалось достучаться до api.telegram.org.",
+            "Тип проверки",
+            "'heartbeat' — новый способ (пинг от самого бота). 'getupdates'/'getme' — исторические "
+            "значения из старых версий, сохранены для совместимости.",
         ),
-        ("Аудит", "Изменения параметров из Telegram (ваш user id в колонке админа)."),
     ]
+    wsl.append(["Термин", "Объяснение"])
+    _style_header(wsl, 1, 2)
     for title, text in legend:
         wsl.append([title, text])
-    wsl.column_dimensions["A"].width = 22
-    wsl.column_dimensions["B"].width = 90
-    for row in wsl.iter_rows(min_row=1, max_row=wsl.max_row, min_col=1, max_col=2):
+    wsl.column_dimensions["A"].width = 28
+    wsl.column_dimensions["B"].width = 100
+    for row in wsl.iter_rows(min_row=2, max_row=wsl.max_row, min_col=1, max_col=2):
         for c in row:
+            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
             c.alignment = WRAP
 
     buf = io.BytesIO()

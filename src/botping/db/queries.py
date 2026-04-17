@@ -21,6 +21,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "disk_usage_threshold_pct": "80",
     "disk_check_interval_sec": "300",
     "telegram_api_probe_enabled": "1",
+    "heartbeat_timeout_sec": "120",
+    "heartbeat_port": "8080",
 }
 
 
@@ -55,45 +57,83 @@ async def set_setting(db: Database, key: str, value: str, admin_chat_id: int | N
         )
 
 
-async def list_monitored_bots(db: Database) -> list[dict[str, Any]]:
-    rows = await db.fetchall(
-        "SELECT id, display_name, token, enabled, created_at FROM monitored_bots ORDER BY id"
-    )
-    return [
-        {
-            "id": r[0],
-            "display_name": r[1],
-            "token": r[2],
-            "enabled": bool(r[3]),
-            "created_at": r[4],
-        }
-        for r in rows
-    ]
+_BOT_COLUMNS = (
+    "id, display_name, token, enabled, created_at, "
+    "heartbeat_secret, last_heartbeat_at, last_heartbeat_ip"
+)
 
 
-async def get_monitored_bot(db: Database, bot_id: int) -> dict[str, Any] | None:
-    r = await db.fetchone(
-        "SELECT id, display_name, token, enabled, created_at FROM monitored_bots WHERE id = ?",
-        (bot_id,),
-    )
-    if not r:
-        return None
+def _row_to_bot(r: Any) -> dict[str, Any]:
     return {
         "id": r[0],
         "display_name": r[1],
         "token": r[2],
         "enabled": bool(r[3]),
         "created_at": r[4],
+        "heartbeat_secret": r[5] or "",
+        "last_heartbeat_at": r[6],
+        "last_heartbeat_ip": r[7],
     }
 
 
-async def insert_monitored_bot(db: Database, display_name: str, token: str) -> int:
+async def list_monitored_bots(db: Database) -> list[dict[str, Any]]:
+    rows = await db.fetchall(
+        f"SELECT {_BOT_COLUMNS} FROM monitored_bots ORDER BY id"
+    )
+    return [_row_to_bot(r) for r in rows]
+
+
+async def get_monitored_bot(db: Database, bot_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        f"SELECT {_BOT_COLUMNS} FROM monitored_bots WHERE id = ?",
+        (bot_id,),
+    )
+    if not r:
+        return None
+    return _row_to_bot(r)
+
+
+async def insert_monitored_bot(
+    db: Database, display_name: str, token: str, heartbeat_secret: str
+) -> int:
     row = await db.write_returning_one(
-        "INSERT INTO monitored_bots (display_name, token, enabled, created_at) VALUES (?, ?, 1, ?) RETURNING id",
-        (display_name.strip(), token.strip(), now_moscow_iso()),
+        """
+        INSERT INTO monitored_bots
+            (display_name, token, enabled, created_at, heartbeat_secret)
+        VALUES (?, ?, 1, ?, ?) RETURNING id
+        """,
+        (display_name.strip(), token.strip(), now_moscow_iso(), heartbeat_secret),
     )
     assert row is not None
     return int(row[0])
+
+
+async def find_bot_by_heartbeat_secret(
+    db: Database, secret: str
+) -> dict[str, Any] | None:
+    if not secret:
+        return None
+    r = await db.fetchone(
+        f"SELECT {_BOT_COLUMNS} FROM monitored_bots WHERE heartbeat_secret = ?",
+        (secret,),
+    )
+    if not r:
+        return None
+    return _row_to_bot(r)
+
+
+async def touch_heartbeat(db: Database, bot_id: int, ip: str | None) -> None:
+    await db.execute(
+        "UPDATE monitored_bots SET last_heartbeat_at = ?, last_heartbeat_ip = ? WHERE id = ?",
+        (now_moscow_iso(), (ip or "")[:64] or None, bot_id),
+    )
+
+
+async def regenerate_heartbeat_secret(db: Database, bot_id: int, new_secret: str) -> None:
+    await db.execute(
+        "UPDATE monitored_bots SET heartbeat_secret = ? WHERE id = ?",
+        (new_secret, bot_id),
+    )
 
 
 async def update_bot_enabled(db: Database, bot_id: int, enabled: bool) -> None:
@@ -567,6 +607,8 @@ def parse_settings_row(settings: dict[str, str]) -> dict[str, Any]:
     out["disk_check_interval_sec"] = max(60, int(settings.get("disk_check_interval_sec", "300")))
     tp = (settings.get("telegram_api_probe_enabled") or "1").strip()
     out["telegram_api_probe_enabled"] = tp == "1"
+    out["heartbeat_timeout_sec"] = max(30, int(settings.get("heartbeat_timeout_sec", "120")))
+    out["heartbeat_port"] = max(1, min(65535, int(settings.get("heartbeat_port", "8080"))))
     return out
 
 

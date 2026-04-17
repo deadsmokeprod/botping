@@ -52,6 +52,12 @@ def settings_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Тихие часы (JSON)", callback_data="set:quiet_hours")],
             [
                 InlineKeyboardButton(
+                    text="Таймаут heartbeat (с)",
+                    callback_data="set:heartbeat_timeout_sec",
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     text="Проверка Telegram API (0/1)",
                     callback_data="set:telegram_api_probe_enabled",
                 )
@@ -84,6 +90,11 @@ def bot_detail(bot_id: int, enabled: bool) -> InlineKeyboardMarkup:
     toggle = "Выключить" if enabled else "Включить"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="Показать сниппет", callback_data=f"bot:snippet:{bot_id}")],
+            [
+                InlineKeyboardButton(text="Показать секрет", callback_data=f"bot:secret:{bot_id}"),
+                InlineKeyboardButton(text="Сменить секрет", callback_data=f"bot:rotate:{bot_id}"),
+            ],
             [InlineKeyboardButton(text=toggle, callback_data=f"bot:toggle:{bot_id}")],
             [InlineKeyboardButton(text="Удалить", callback_data=f"bot:delask:{bot_id}")],
             [InlineKeyboardButton(text="К списку ботов", callback_data="menu:bots")],

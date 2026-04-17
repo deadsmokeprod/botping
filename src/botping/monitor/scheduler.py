@@ -9,7 +9,7 @@ import httpx
 
 from botping.db import queries
 from botping.db.pool import Database
-from botping.monitor.checker import probe_getme_api, probe_getupdates
+from botping.monitor.checker import probe_getme_api
 from botping.monitor.quiet import in_quiet_hours
 from botping.timeutil import MOSCOW_TZ
 
@@ -28,6 +28,16 @@ def _parse_sqlite_ts(s: str | None) -> datetime | None:
         return None
 
 
+def _format_age(sec: int) -> str:
+    if sec < 60:
+        return f"{sec} с"
+    if sec < 3600:
+        return f"{sec // 60} мин"
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    return f"{h} ч {m} мин" if m else f"{h} ч"
+
+
 async def _run_telegram_api_probe(
     db: Database,
     http_client: httpx.AsyncClient,
@@ -40,12 +50,7 @@ async def _run_telegram_api_probe(
     res = await probe_getme_api(http_client, admin_bot_token, timeout)
     ok = res.bot_alive is True and res.telegram_reachable
     await queries.insert_telegram_check(
-        db,
-        ok,
-        res.latency_ms,
-        res.http_status,
-        res.error_text,
-        res.rate_limited,
+        db, ok, res.latency_ms, res.http_status, res.error_text, res.rate_limited
     )
 
     if res.rate_limited:
@@ -80,6 +85,14 @@ async def _run_telegram_api_probe(
             )
 
 
+def _heartbeat_age_sec(bot: dict) -> int | None:
+    last = _parse_sqlite_ts(bot.get("last_heartbeat_at"))
+    if last is None:
+        return None
+    now = datetime.now(MOSCOW_TZ)
+    return max(0, int((now - last).total_seconds()))
+
+
 async def scheduler_loop(
     db: Database,
     http_client: httpx.AsyncClient,
@@ -98,18 +111,14 @@ async def scheduler_loop(
             repeat_sec = int(settings["repeat_alert_interval_sec"])
             quiet = settings.get("quiet_hours") or {}
             tg_probe_on = bool(settings.get("telegram_api_probe_enabled", True))
+            hb_timeout = int(settings["heartbeat_timeout_sec"])
             quiet_down = in_quiet_hours(quiet)
 
             if tg_probe_on and admin_bot_token:
                 try:
                     await _run_telegram_api_probe(
-                        db,
-                        http_client,
-                        notify,
-                        admin_bot_token,
-                        timeout,
-                        repeat_sec,
-                        quiet_down,
+                        db, http_client, notify, admin_bot_token,
+                        timeout, repeat_sec, quiet_down,
                     )
                 except Exception:
                     logger.exception("telegram api probe failed")
@@ -123,48 +132,36 @@ async def scheduler_loop(
                 if inc:
                     consecutive[bid] = max(consecutive.get(bid, 0), fail_threshold)
 
-                res = await probe_getupdates(http_client, b["token"], timeout)
-
-                # Записываем проверку всегда. Для "Telegram недоступен" фиксируем
-                # факт неудачного запроса (ok=0, error_text), но НЕ увеличиваем
-                # счётчик падений бота — это вина сети Botping↔Telegram, её
-                # поймает отдельная telegram_api-проверка.
-                if res.telegram_reachable:
-                    row_ok = res.bot_alive is True
+                age = _heartbeat_age_sec(b)
+                if age is None:
+                    alive = False
+                    err_text = "нет ни одного heartbeat"
+                    latency_val: int | None = None
                 else:
-                    row_ok = False
+                    alive = age <= hb_timeout
+                    latency_val = age * 1000
+                    err_text = None if alive else f"нет heartbeat {_format_age(age)}"
+
                 await queries.insert_check(
                     db,
                     bid,
-                    row_ok,
-                    res.latency_ms,
-                    res.http_status,
-                    res.error_text,
-                    res.rate_limited,
-                    check_type="getupdates",
+                    alive,
+                    latency_val,
+                    None,
+                    err_text,
+                    False,
+                    check_type="heartbeat",
                 )
-
-                if res.rate_limited:
-                    logger.warning("Rate limited for bot_id=%s", bid)
-                    continue
 
                 name = b["display_name"]
 
-                if not res.telegram_reachable:
-                    logger.info(
-                        "Telegram unreachable for bot_id=%s: %s (не влияет на bot-инцидент)",
-                        bid,
-                        res.error_text,
-                    )
-                    continue
-
-                if res.bot_alive is True:
+                if alive:
                     consecutive[bid] = 0
                     open_inc = await queries.get_open_incident(db, bid)
                     if open_inc:
                         await queries.close_incident(db, int(open_inc["id"]))
                         await notify(
-                            f"Восстановлено: {name} (id={bid}). Бот снова ведёт getUpdates."
+                            f"Восстановлено: {name} (id={bid}). Heartbeat снова приходит."
                         )
                 else:
                     consecutive[bid] = consecutive.get(bid, 0) + 1
@@ -172,7 +169,7 @@ async def scheduler_loop(
 
                     if open_inc:
                         iid = int(open_inc["id"])
-                        await queries.update_incident_error(db, iid, res.error_text or "")
+                        await queries.update_incident_error(db, iid, err_text or "")
                         last_alert = _parse_sqlite_ts(str(open_inc["last_alert_at"]))
                         now = datetime.now(MOSCOW_TZ)
                         elapsed = (now - last_alert).total_seconds() if last_alert else repeat_sec + 1
@@ -180,20 +177,22 @@ async def scheduler_loop(
                             if not quiet_down:
                                 await notify(
                                     f"Всё ещё недоступен: {name} (id={bid}). "
-                                    f"Бот не ведёт getUpdates (процесс не запущен или нет интернета на сервере бота). "
-                                    f"Ошибка: {res.error_text}"
+                                    f"{err_text}. Похоже, процесс бота остановлен "
+                                    f"или у сервера бота нет интернета."
                                 )
                             await queries.touch_incident_alert(db, iid)
                     elif consecutive[bid] >= fail_threshold:
-                        iid = await queries.open_incident(db, bid, res.error_text)
+                        iid = await queries.open_incident(db, bid, err_text)
                         if not quiet_down:
                             await notify(
-                                f"Недоступен: {name} (id={bid}). "
-                                f"Бот не ведёт getUpdates (процесс не запущен или нет интернета на сервере бота). "
-                                f"Ошибка: {res.error_text}"
+                                f"Недоступен: {name} (id={bid}). {err_text}. "
+                                f"Похоже, процесс бота остановлен или у сервера бота нет интернета."
                             )
                         else:
-                            logger.info("Incident opened during quiet hours, alert suppressed: %s", name)
+                            logger.info(
+                                "Incident opened during quiet hours, alert suppressed: %s",
+                                name,
+                            )
 
         except asyncio.CancelledError:
             raise

@@ -7,7 +7,13 @@ CREATE TABLE IF NOT EXISTS monitored_bots (
     token TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     -- Рекомендуется задавать created_at из приложения (Europe/Moscow).
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Персональный секрет для heartbeat-эндпоинта. Бот шлёт его
+    -- в заголовке X-Heartbeat-Secret на POST /heartbeat.
+    heartbeat_secret TEXT,
+    -- Время последнего принятого пинга (Москва) и IP источника.
+    last_heartbeat_at TEXT,
+    last_heartbeat_ip TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (

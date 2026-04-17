@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 import httpx
@@ -18,10 +19,10 @@ from botping.bot.settings_help import META, format_key_change_prompt
 from botping.bot.states import AddBotStates, QuietHoursStates, ReportStates, SettingStates
 from botping.bot.ui import edit_or_answer
 from botping.db import queries
-from botping.db.pool import Database
+from botping.db.pool import Database, generate_heartbeat_secret
 from botping.monitor.checker import check_getme
 from botping.monitor.disk_guard import get_disk_info
-from botping.timeutil import now_moscow_naive
+from botping.timeutil import MOSCOW_TZ, now_moscow_naive
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,75 @@ def mask_token(token: str) -> str:
     return f"{t[:4]}…{t[-4:]}"
 
 
+def mask_secret(secret: str) -> str:
+    s = (secret or "").strip()
+    if len(s) <= 8:
+        return "***"
+    return f"{s[:4]}…{s[-4:]}"
+
+
+def _format_age_ru(sec: int) -> str:
+    if sec < 60:
+        return f"{sec} с"
+    if sec < 3600:
+        return f"{sec // 60} мин"
+    h = sec // 3600
+    m = (sec % 3600) // 60
+    return f"{h} ч {m} мин" if m else f"{h} ч"
+
+
+def _heartbeat_age_sec(bot: dict) -> int | None:
+    raw = bot.get("last_heartbeat_at")
+    if not raw:
+        return None
+    try:
+        naive = datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S")
+        last = naive.replace(tzinfo=MOSCOW_TZ)
+    except ValueError:
+        return None
+    now = datetime.now(MOSCOW_TZ)
+    return max(0, int((now - last).total_seconds()))
+
+
+def _public_host_from_env() -> str:
+    """URL, на который боты будут слать heartbeat.
+
+    Приоритет: переменная окружения BOTPING_PUBLIC_URL (если задана) →
+    'http://<IP_VPS>:<port>' (IP вводится вручную при сомнении).
+    """
+    url = os.getenv("BOTPING_PUBLIC_URL", "").strip().rstrip("/")
+    if url:
+        return url
+    host = os.getenv("BOTPING_PUBLIC_HOST", "").strip()
+    port = os.getenv("HEARTBEAT_PORT", "8080").strip() or "8080"
+    if host:
+        return f"http://{host}:{port}"
+    return f"http://<IP_VPS>:{port}"
+
+
+def _heartbeat_snippet(secret: str) -> str:
+    base = _public_host_from_env()
+    return (
+        "# --- Botping heartbeat (вставьте рядом с dp.start_polling) ---\n"
+        "import asyncio, httpx\n"
+        f"BOTPING_URL = \"{base}/heartbeat\"\n"
+        f"HEARTBEAT_SECRET = \"{secret}\"\n"
+        "\n"
+        "async def _botping_heartbeat():\n"
+        "    headers = {\"X-Heartbeat-Secret\": HEARTBEAT_SECRET}\n"
+        "    async with httpx.AsyncClient(timeout=10) as client:\n"
+        "        while True:\n"
+        "            try:\n"
+        "                await client.post(BOTPING_URL, headers=headers)\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "            await asyncio.sleep(30)\n"
+        "\n"
+        "# где-то после создания event loop, перед dp.start_polling(bot):\n"
+        "# asyncio.create_task(_botping_heartbeat())\n"
+    )
+
+
 def _chunk_text(s: str, limit: int = 3900) -> list[str]:
     if len(s) <= limit:
         return [s]
@@ -70,6 +140,7 @@ def _chunk_text(s: str, limit: int = 3900) -> list[str]:
 async def _format_status(db: Database) -> str:
     bots = await queries.list_monitored_bots(db)
     settings = await queries.load_all_settings(db)
+    hb_timeout = int(settings["heartbeat_timeout_sec"])
     tg_last = await queries.get_last_telegram_check(db)
     tg_inc = await queries.get_open_telegram_incident(db)
 
@@ -79,23 +150,21 @@ async def _format_status(db: Database) -> str:
         lines.append("Нет ботов. Добавьте через «Боты» → «+ Добавить бота».")
     else:
         for b in bots:
-            last = await queries.get_last_check(db, int(b["id"]))
             inc = await queries.get_open_incident(db, int(b["id"]))
-            st = "выкл" if not b["enabled"] else "вкл"
-            if not last:
-                lines.append(f"- {b['display_name']} (id={b['id']}, {st}): проверок ещё не было")
-                continue
-            ok = "ok" if last["ok"] else "FAIL"
-            lat = last["latency_ms"] if last["latency_ms"] is not None else "?"
-            rl = " (rate_limit)" if last.get("rate_limited") else ""
+            st = "вкл" if b["enabled"] else "выкл"
+            age = _heartbeat_age_sec(b)
             inc_s = " ИНЦИДЕНТ" if inc else ""
-            err = f" — {last['error_text']}" if last["error_text"] else ""
-            lines.append(
-                f"- {b['display_name']} (id={b['id']}, {st}): {ok} (поллинг){rl}, "
-                f"{last['ts']}, {lat}ms{err}{inc_s}"
-            )
+            if age is None:
+                state = "НЕТ ПИНГОВ (сниппет не вставлен или бот не запускался)"
+            elif age <= hb_timeout:
+                state = f"ЖИВ, последний пинг {_format_age_ru(age)} назад"
+            else:
+                state = f"НЕДОСТУПЕН, нет пинга уже {_format_age_ru(age)}"
+            lines.append(f"- {b['display_name']} (id={b['id']}, {st}): {state}{inc_s}")
 
     lines.append("---")
+    lines.append(f"Порог «живости» (таймаут пинга): {_format_age_ru(hb_timeout)}")
+
     if settings.get("telegram_api_probe_enabled", True):
         if not tg_last:
             tg_line = "Telegram API: проверок ещё не было"
@@ -148,12 +217,12 @@ def setup_router() -> Router:
     async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "Botping: мониторинг ваших ботов.\n"
-            "Основная проверка — getUpdates-зонд (409 Conflict = бот реально поллит).\n"
-            "Дополнительная — getMe к admin-боту (доступность Telegram API).\n"
+            "Botping: мониторинг ваших ботов через heartbeat.\n"
+            "Каждый ваш бот сам раз в 30 секунд пингует Botping. Нет пинга — инцидент.\n"
+            "Отдельно проверяется доступность Telegram API (getMe к admin-боту).\n"
             "Команды: /status, /failures, /settings, /report\n"
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
-            "Добавлять и включать/выключать ботов можно в меню «Боты».",
+            "Добавить бота: «Боты» → «+ Добавить бота». После добавления покажу сниппет, который надо вставить в ваш бот.",
             reply_markup=kb.main_menu(),
         )
 
@@ -329,13 +398,80 @@ def setup_router() -> Router:
             await cq.answer("Не найден", show_alert=True)
             return
         token_m = mask_token(str(b["token"]))
+        secret_m = mask_secret(str(b["heartbeat_secret"]))
         en = bool(b["enabled"])
-        await edit_or_answer(
-            cq,
-            f"Бот: {b['display_name']}\nid={bid}\nТокен: {token_m}\nСтатус: {'вкл' if en else 'выкл'}",
-            reply_markup=kb.bot_detail(bid, en),
+        settings = await queries.load_all_settings(db)
+        hb_timeout = int(settings["heartbeat_timeout_sec"])
+        age = _heartbeat_age_sec(b)
+        if age is None:
+            hb_state = "нет ни одного пинга"
+        elif age <= hb_timeout:
+            hb_state = f"ЖИВ, пинг {_format_age_ru(age)} назад"
+        else:
+            hb_state = f"НЕДОСТУПЕН, нет пинга {_format_age_ru(age)}"
+        last_hb = b.get("last_heartbeat_at") or "—"
+        last_ip = b.get("last_heartbeat_ip") or "—"
+        text = (
+            f"Бот: {b['display_name']}\n"
+            f"id={bid}\n"
+            f"Токен: {token_m}\n"
+            f"Статус: {'вкл' if en else 'выкл'}\n"
+            f"Heartbeat: {hb_state}\n"
+            f"Последний пинг: {last_hb}\n"
+            f"С IP: {last_ip}\n"
+            f"Секрет: {secret_m}\n"
+            f"URL: {_public_host_from_env()}/heartbeat"
+        )
+        await edit_or_answer(cq, text, reply_markup=kb.bot_detail(bid, en))
+        await cq.answer()
+
+    @router.callback_query(F.data.startswith("bot:snippet:"))
+    async def on_bot_snippet(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        b = await queries.get_monitored_bot(db, bid)
+        if not b:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        secret = str(b["heartbeat_secret"])
+        snippet = _heartbeat_snippet(secret)
+        await cq.message.answer(
+            "Сниппет для вашего бота (вставьте рядом с dp.start_polling).\n"
+            "Если вместо `<IP_VPS>` у вас заглушка — задайте в .env переменную "
+            "`BOTPING_PUBLIC_HOST=198.51.100.42` (или свой IP/домен) и перезапустите Botping."
+        )
+        await cq.message.answer(f"<pre>{snippet}</pre>", parse_mode="HTML")
+        await cq.answer()
+
+    @router.callback_query(F.data.startswith("bot:secret:"))
+    async def on_bot_secret(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        b = await queries.get_monitored_bot(db, bid)
+        if not b:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        secret = str(b["heartbeat_secret"])
+        await cq.message.answer(
+            f"Секрет бота {b['display_name']} (id={bid}):\n<code>{secret}</code>\n\n"
+            "Не делитесь им. Любой, у кого он есть, сможет отправлять фальшивые пинги.",
+            parse_mode="HTML",
         )
         await cq.answer()
+
+    @router.callback_query(F.data.startswith("bot:rotate:"))
+    async def on_bot_rotate(cq: CallbackQuery, db: Database) -> None:
+        bid = int(cq.data.split(":")[2])
+        b = await queries.get_monitored_bot(db, bid)
+        if not b:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        new_secret = generate_heartbeat_secret()
+        await queries.regenerate_heartbeat_secret(db, bid, new_secret)
+        await cq.message.answer(
+            f"Новый секрет для {b['display_name']} (id={bid}):\n<code>{new_secret}</code>\n\n"
+            "Старый больше не работает. Обновите сниппет в коде бота и перезапустите его.",
+            parse_mode="HTML",
+        )
+        await cq.answer("Секрет обновлён")
 
     @router.callback_query(F.data.startswith("bot:toggle:"))
     async def on_bot_toggle(cq: CallbackQuery, db: Database) -> None:
@@ -411,12 +547,17 @@ def setup_router() -> Router:
                 f"Токен невалиден у Telegram: {res.error_text}. Проверьте токен и попробуйте снова."
             )
             return
-        new_id = await queries.insert_monitored_bot(db, name, token)
+        secret = generate_heartbeat_secret()
+        new_id = await queries.insert_monitored_bot(db, name, token, secret)
         await state.clear()
         await message.answer(
-            f"Бот добавлен: {name} (id={new_id}). Мониторинг начнётся на следующем цикле.",
+            f"Бот добавлен: {name} (id={new_id}).\n"
+            "Ниже — сниппет, его нужно вставить в код вашего бота рядом с запуском поллинга, "
+            "и перезапустить бота. Как только от него придёт первый пинг, в /status появится «ЖИВ».",
             reply_markup=kb.main_menu(),
         )
+        snippet = _heartbeat_snippet(secret)
+        await message.answer(f"<pre>{snippet}</pre>", parse_mode="HTML")
 
     @router.message(StateFilter(default_state), F.text, ~F.text.startswith("/"))
     async def fallback_plain(message: Message) -> None:

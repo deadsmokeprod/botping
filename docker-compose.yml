@@ -4,6 +4,10 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Порт нужен, чтобы ваши боты могли слать heartbeat на VPS.
+    # Если поменяете heartbeat_port в настройках — поменяйте и здесь.
+    ports:
+      - "8080:8080"
     volumes:
       - botping_data:/app/data
 
