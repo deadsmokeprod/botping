@@ -49,7 +49,13 @@ def build_availability_report(
     checks_total_in_db: int = 0,
     checks_db_min_ts: str | None = None,
     checks_db_max_ts: str | None = None,
+    telegram_checks: list[dict[str, Any]] | None = None,
+    telegram_incidents: list[dict[str, Any]] | None = None,
+    telegram_checks_truncated: bool = False,
+    telegram_incidents_truncated: bool = False,
 ) -> bytes:
+    telegram_checks = telegram_checks or []
+    telegram_incidents = telegram_incidents or []
     wb = Workbook()
     # --- Сводка ---
     ws0 = wb.active
@@ -74,8 +80,26 @@ def build_availability_report(
         ]
     )
     ws0.append([])
-    ws0.append(["Лист «Проверки»", "каждая строка — один вызов getMe: успех/ошибка, задержка, код HTTP, текст ошибки, rate limit"])
-    ws0.append(["Лист «Инциденты»", "эпизоды недоступности, пересекающие выбранный период"])
+    ws0.append(
+        [
+            "Лист «Проверки»",
+            "каждая строка — один per-bot зонд (getUpdates, 409 Conflict = бот реально поллит). "
+            "Исторические строки до миграции имеют тип 'getme'.",
+        ]
+    )
+    ws0.append(["Лист «Инциденты»", "эпизоды недоступности ботов, пересекающие выбранный период"])
+    ws0.append(
+        [
+            "Лист «Telegram API»",
+            "вторичная проверка: каждая строка — один getMe к admin-боту для глобальной доступности Telegram API",
+        ]
+    )
+    ws0.append(
+        [
+            "Лист «Инциденты Telegram API»",
+            "эпизоды недоступности самого Telegram API с VPS Botping, пересекающие выбранный период",
+        ]
+    )
     ws0.append(["Лист «Боты»", "снимок списка мониторинга на момент отчёта"])
     ws0.append(["Лист «Аудит настроек»", "кто и когда менял параметры (если были изменения в периоде)"])
     ws0.append([])
@@ -90,6 +114,18 @@ def build_availability_report(
         [
             "Строк инцидентов",
             f"{len(incidents)}{' (обрезано)' if incidents_truncated else ''}",
+        ]
+    )
+    ws0.append(
+        [
+            "Строк Telegram API проверок",
+            f"{len(telegram_checks)}{' (обрезано)' if telegram_checks_truncated else ''}",
+        ]
+    )
+    ws0.append(
+        [
+            "Строк инцидентов Telegram API",
+            f"{len(telegram_incidents)}{' (обрезано)' if telegram_incidents_truncated else ''}",
         ]
     )
     ws0.append(
@@ -139,9 +175,10 @@ def build_availability_report(
             "HTTP статус",
             "Текст ошибки",
             "Rate limit (1 да)",
+            "Тип проверки",
         ]
     )
-    _style_header(wsc, 1, 9)
+    _style_header(wsc, 1, 10)
     for r in checks:
         wsc.append(
             [
@@ -154,14 +191,77 @@ def build_availability_report(
                 r["http_status"] if r["http_status"] is not None else "",
                 r["error_text"] or "",
                 1 if r["rate_limited"] else 0,
+                r.get("check_type") or "getupdates",
             ]
         )
-    for row in wsc.iter_rows(min_row=2, max_row=wsc.max_row, min_col=1, max_col=9):
+    for row in wsc.iter_rows(min_row=2, max_row=wsc.max_row, min_col=1, max_col=10):
         for c in row:
             c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
             c.alignment = WRAP
     wsc.freeze_panes = "A2"
     _autosize(wsc, max_width=56)
+
+    # --- Telegram API (глобальная вторичная проверка) ---
+    wst = wb.create_sheet("Telegram API")
+    wst.append(
+        [
+            "ID проверки",
+            "Время (Москва)",
+            "Успех (1 да / 0 нет)",
+            "Задержка мс",
+            "HTTP статус",
+            "Текст ошибки",
+            "Rate limit (1 да)",
+        ]
+    )
+    _style_header(wst, 1, 7)
+    for r in telegram_checks:
+        wst.append(
+            [
+                r["id"],
+                r["ts"],
+                1 if r["ok"] else 0,
+                r["latency_ms"] if r["latency_ms"] is not None else "",
+                r["http_status"] if r["http_status"] is not None else "",
+                r["error_text"] or "",
+                1 if r["rate_limited"] else 0,
+            ]
+        )
+    for row in wst.iter_rows(min_row=2, max_row=wst.max_row, min_col=1, max_col=7):
+        for c in row:
+            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+            c.alignment = WRAP
+    wst.freeze_panes = "A2"
+    _autosize(wst, max_width=56)
+
+    # --- Инциденты Telegram API ---
+    wsti = wb.create_sheet("Инциденты Telegram API")
+    wsti.append(
+        [
+            "ID инцидента",
+            "Начало (Москва)",
+            "Окончание (Москва, пусто = ещё открыт)",
+            "Последняя ошибка",
+            "Последний алерт (Москва)",
+        ]
+    )
+    _style_header(wsti, 1, 5)
+    for r in telegram_incidents:
+        wsti.append(
+            [
+                r["id"],
+                r["started_at"],
+                r["ended_at"] or "",
+                r["last_error"] or "",
+                r.get("last_alert_at") or "",
+            ]
+        )
+    for row in wsti.iter_rows(min_row=2, max_row=wsti.max_row, min_col=1, max_col=5):
+        for c in row:
+            c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+            c.alignment = WRAP
+    wsti.freeze_panes = "A2"
+    _autosize(wsti)
 
     # --- Инциденты ---
     wsi = wb.create_sheet("Инциденты")
@@ -224,13 +324,29 @@ def build_availability_report(
     # --- Легенда ---
     wsl = wb.create_sheet("Легенда")
     legend = [
-        ("Проверки", "Каждая запись — результат одного getMe к Bot API для токена бота."),
-        ("Успех", "1 = ответ ok, бот считается доступным в этот момент."),
-        ("Задержка мс", "Время ответа getMe (для анализа деградации сети)."),
+        (
+            "Проверки",
+            "Основной per-bot зонд. Каждая строка — один getUpdates (POST, timeout=0, offset=-1, limit=1). "
+            "HTTP 409 Conflict → бот реально ведёт long-poll (ok=1). "
+            "HTTP 200 ok=true → никто не поллит, бот считается недоступным (ok=0). "
+            "Сетевая ошибка/5xx → Telegram API сам недоступен с VPS Botping — ok=0, но счётчик падений бота не растёт.",
+        ),
+        ("Тип проверки", "'getupdates' — новый per-bot зонд; 'getme' — исторические строки до миграции."),
+        ("Успех", "1 = бот жив в момент проверки; 0 = не жив либо Telegram недоступен."),
+        ("Задержка мс", "Время ответа зонда (для анализа деградации сети)."),
         ("HTTP статус", "Код ответа HTTP; может быть пусто при таймауте/сетевой ошибке."),
-        ("Текст ошибки", "Краткое описание от Telegram или timeout/invalid_json."),
+        ("Текст ошибки", "Краткое описание от Telegram или timeout/invalid_json/имя исключения."),
         ("Rate limit", "1 если Telegram вернул 429 — в логике мониторинга не увеличивает счётчик падений."),
-        ("Инциденты", "Период, когда бот признан недоступным (порог подряд неудач), до восстановления."),
+        ("Инциденты", "Период, когда per-bot зонд стабильно говорил «не поллит» (порог подряд неудач), до восстановления."),
+        (
+            "Telegram API",
+            "Вторичная проверка: раз в тик один getMe к admin-боту. Её падения НЕ открывают per-bot инцидент, "
+            "а отражают глобальную проблему со связью VPS Botping ↔ Telegram.",
+        ),
+        (
+            "Инциденты Telegram API",
+            "Период, когда с VPS Botping не удавалось достучаться до api.telegram.org.",
+        ),
         ("Аудит", "Изменения параметров из Telegram (ваш user id в колонке админа)."),
     ]
     for title, text in legend:

@@ -41,7 +41,7 @@ async def _amain() -> None:
                 logger.exception("Failed to send alert to %s", chat_id)
 
     stop = asyncio.Event()
-    sched_task, http_client = start_scheduler(db, notify, stop)
+    sched_task, http_client = start_scheduler(db, notify, stop, settings.admin_bot_token)
     daily_task = start_daily_report_loop(db, bot, settings.admin_chat_ids, stop)
     disk_task = start_disk_guard(db, notify, stop)
 

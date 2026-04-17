@@ -27,6 +27,8 @@ async def build_availability_report_bundle(
     checks, c_trunc = await queries.export_checks_for_report(db, start_iso, end_iso)
     incidents, i_trunc = await queries.export_incidents_overlapping(db, start_iso, end_iso)
     audit, a_trunc = await queries.export_settings_audit_for_report(db, start_iso, end_iso)
+    tg_checks, tc_trunc = await queries.export_telegram_checks_for_report(db, start_iso, end_iso)
+    tg_incidents, ti_trunc = await queries.export_telegram_incidents_overlapping(db, start_iso, end_iso)
     settings_rows = await queries.list_settings_raw_pairs_for_report(db)
     ck_stats = await queries.get_checks_storage_stats(db)
     now = now_moscow_naive()
@@ -45,6 +47,10 @@ async def build_availability_report_bundle(
         checks_total_in_db=int(ck_stats["count"]),
         checks_db_min_ts=ck_stats.get("min_ts"),
         checks_db_max_ts=ck_stats.get("max_ts"),
+        telegram_checks=tg_checks,
+        telegram_incidents=tg_incidents,
+        telegram_checks_truncated=tc_trunc,
+        telegram_incidents_truncated=ti_trunc,
     )
     fn = f"botping_{period_start.strftime('%Y%m%d')}_{period_end.strftime('%Y%m%d')}.xlsx"
     cap = (

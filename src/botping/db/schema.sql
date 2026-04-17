@@ -24,10 +24,38 @@ CREATE TABLE IF NOT EXISTS checks (
     latency_ms INTEGER,
     http_status INTEGER,
     error_text TEXT,
-    rate_limited INTEGER NOT NULL DEFAULT 0
+    rate_limited INTEGER NOT NULL DEFAULT 0,
+    -- тип проверки: 'getupdates' (основной зонд на живость бота)
+    -- или 'getme' (исторические записи до миграции)
+    check_type TEXT NOT NULL DEFAULT 'getupdates'
 );
 
 CREATE INDEX IF NOT EXISTS idx_checks_bot_ts ON checks(bot_id, ts);
+
+-- Глобальная проверка доступности самого Telegram Bot API (вторичная, одна на тик).
+CREATE TABLE IF NOT EXISTS telegram_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- приложение пишет метку Europe/Moscow
+    ts TEXT NOT NULL DEFAULT (datetime('now')),
+    ok INTEGER NOT NULL,
+    latency_ms INTEGER,
+    http_status INTEGER,
+    error_text TEXT,
+    rate_limited INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_checks_ts ON telegram_checks(ts);
+
+CREATE TABLE IF NOT EXISTS telegram_incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- приложение задаёт Europe/Moscow
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    last_error TEXT,
+    last_alert_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_telegram_incidents_open ON telegram_incidents(started_at) WHERE ended_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS incidents (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

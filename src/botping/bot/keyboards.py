@@ -50,6 +50,12 @@ def settings_menu() -> InlineKeyboardMarkup:
                 )
             ],
             [InlineKeyboardButton(text="Тихие часы (JSON)", callback_data="set:quiet_hours")],
+            [
+                InlineKeyboardButton(
+                    text="Проверка Telegram API (0/1)",
+                    callback_data="set:telegram_api_probe_enabled",
+                )
+            ],
             [InlineKeyboardButton(text="Порог очистки диска (%)", callback_data="set:disk_usage_threshold_pct")],
             [InlineKeyboardButton(text="Интервал проверки диска (с)", callback_data="set:disk_check_interval_sec")],
             [InlineKeyboardButton(text="Назад", callback_data="menu:main")],

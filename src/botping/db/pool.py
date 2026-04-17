@@ -35,6 +35,20 @@ class Database:
         sql = SCHEMA_PATH.read_text(encoding="utf-8")
         await self._conn.executescript(sql)
         await self._conn.commit()
+        await self._migrate()
+
+    async def _migrate(self) -> None:
+        """Идемпотентные миграции поверх schema.sql для уже существующих БД."""
+        assert self._conn is not None
+        cur = await self._conn.execute("PRAGMA table_info(checks)")
+        cols = [row[1] for row in await cur.fetchall()]
+        if "check_type" not in cols:
+            # У старых БД до миграции в таблице checks нет типа — это были
+            # getMe-проверки, помечаем историю соответствующим значением.
+            await self._conn.execute(
+                "ALTER TABLE checks ADD COLUMN check_type TEXT NOT NULL DEFAULT 'getme'"
+            )
+            await self._conn.commit()
 
     @property
     def connection(self) -> aiosqlite.Connection:

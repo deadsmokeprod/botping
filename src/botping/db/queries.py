@@ -20,6 +20,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "daily_excel_report_enabled": "0",
     "disk_usage_threshold_pct": "80",
     "disk_check_interval_sec": "300",
+    "telegram_api_probe_enabled": "1",
 }
 
 
@@ -114,11 +115,12 @@ async def insert_check(
     http_status: int | None,
     error_text: str | None,
     rate_limited: bool,
+    check_type: str = "getupdates",
 ) -> None:
     await db.execute(
         """
-        INSERT INTO checks (bot_id, ok, latency_ms, http_status, error_text, rate_limited, ts)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO checks (bot_id, ok, latency_ms, http_status, error_text, rate_limited, ts, check_type)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             bot_id,
@@ -128,6 +130,7 @@ async def insert_check(
             (error_text or "")[:500],
             1 if rate_limited else 0,
             now_moscow_iso(),
+            check_type,
         ),
     )
 
@@ -135,7 +138,7 @@ async def insert_check(
 async def get_last_check(db: Database, bot_id: int) -> dict[str, Any] | None:
     r = await db.fetchone(
         """
-        SELECT id, bot_id, ts, ok, latency_ms, http_status, error_text, rate_limited
+        SELECT id, bot_id, ts, ok, latency_ms, http_status, error_text, rate_limited, check_type
         FROM checks WHERE bot_id = ? ORDER BY id DESC LIMIT 1
         """,
         (bot_id,),
@@ -151,6 +154,7 @@ async def get_last_check(db: Database, bot_id: int) -> dict[str, Any] | None:
         "http_status": r[5],
         "error_text": r[6] or "",
         "rate_limited": bool(r[7]),
+        "check_type": r[8] or "getupdates",
     }
 
 
@@ -208,6 +212,106 @@ async def close_incident(db: Database, incident_id: int) -> None:
     )
 
 
+# ── Telegram API probe (вторичная проверка доступности Telegram в целом) ──
+
+async def insert_telegram_check(
+    db: Database,
+    ok: bool,
+    latency_ms: int | None,
+    http_status: int | None,
+    error_text: str | None,
+    rate_limited: bool,
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO telegram_checks (ts, ok, latency_ms, http_status, error_text, rate_limited)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            now_moscow_iso(),
+            1 if ok else 0,
+            latency_ms,
+            http_status,
+            (error_text or "")[:500],
+            1 if rate_limited else 0,
+        ),
+    )
+
+
+async def get_last_telegram_check(db: Database) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, ts, ok, latency_ms, http_status, error_text, rate_limited
+        FROM telegram_checks ORDER BY id DESC LIMIT 1
+        """
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "ts": r[1],
+        "ok": bool(r[2]),
+        "latency_ms": r[3],
+        "http_status": r[4],
+        "error_text": r[5] or "",
+        "rate_limited": bool(r[6]),
+    }
+
+
+async def open_telegram_incident(db: Database, last_error: str | None) -> int:
+    ts = now_moscow_iso()
+    row = await db.write_returning_one(
+        """
+        INSERT INTO telegram_incidents (started_at, last_error, last_alert_at)
+        VALUES (?, ?, ?) RETURNING id
+        """,
+        (ts, (last_error or "")[:500], ts),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def get_open_telegram_incident(db: Database) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, started_at, ended_at, last_error, last_alert_at
+        FROM telegram_incidents WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1
+        """
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "started_at": r[1],
+        "ended_at": r[2],
+        "last_error": r[3],
+        "last_alert_at": r[4],
+    }
+
+
+async def update_telegram_incident_error(
+    db: Database, incident_id: int, last_error: str
+) -> None:
+    await db.execute(
+        "UPDATE telegram_incidents SET last_error = ? WHERE id = ?",
+        ((last_error or "")[:500], incident_id),
+    )
+
+
+async def touch_telegram_incident_alert(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE telegram_incidents SET last_alert_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def close_telegram_incident(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE telegram_incidents SET ended_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
 EXPORT_CHECKS_LIMIT = 200_000
 EXPORT_INCIDENTS_LIMIT = 50_000
 EXPORT_AUDIT_LIMIT = 50_000
@@ -221,7 +325,7 @@ async def export_checks_for_report(
     lim = EXPORT_CHECKS_LIMIT + 1
     rows = await db.fetchall(
         """
-        SELECT c.id, c.bot_id, b.display_name, c.ts, c.ok, c.latency_ms, c.http_status, c.error_text, c.rate_limited
+        SELECT c.id, c.bot_id, b.display_name, c.ts, c.ok, c.latency_ms, c.http_status, c.error_text, c.rate_limited, c.check_type
         FROM checks c
         JOIN monitored_bots b ON b.id = c.bot_id
         WHERE c.ts >= ? AND c.ts <= ?
@@ -244,6 +348,77 @@ async def export_checks_for_report(
             "http_status": r[6],
             "error_text": r[7] or "",
             "rate_limited": bool(r[8]),
+            "check_type": r[9] or "getupdates",
+        }
+        for r in rows
+    ]
+    return out, truncated
+
+
+EXPORT_TELEGRAM_CHECKS_LIMIT = 200_000
+EXPORT_TELEGRAM_INCIDENTS_LIMIT = 10_000
+
+
+async def export_telegram_checks_for_report(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_TELEGRAM_CHECKS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT id, ts, ok, latency_ms, http_status, error_text, rate_limited
+        FROM telegram_checks
+        WHERE ts >= ? AND ts <= ?
+        ORDER BY ts ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_TELEGRAM_CHECKS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_TELEGRAM_CHECKS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "ts": r[1],
+            "ok": bool(r[2]),
+            "latency_ms": r[3],
+            "http_status": r[4],
+            "error_text": r[5] or "",
+            "rate_limited": bool(r[6]),
+        }
+        for r in rows
+    ]
+    return out, truncated
+
+
+async def export_telegram_incidents_overlapping(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_TELEGRAM_INCIDENTS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT id, started_at, ended_at, last_error, last_alert_at
+        FROM telegram_incidents
+        WHERE (ended_at IS NULL OR ended_at >= ?) AND started_at <= ?
+        ORDER BY started_at ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_TELEGRAM_INCIDENTS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_TELEGRAM_INCIDENTS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "started_at": r[1],
+            "ended_at": r[2],
+            "last_error": r[3] or "",
+            "last_alert_at": r[4],
         }
         for r in rows
     ]
@@ -390,6 +565,8 @@ def parse_settings_row(settings: dict[str, str]) -> dict[str, Any]:
     out["daily_excel_report_enabled"] = v == "1"
     out["disk_usage_threshold_pct"] = max(50, min(95, int(settings.get("disk_usage_threshold_pct", "80"))))
     out["disk_check_interval_sec"] = max(60, int(settings.get("disk_check_interval_sec", "300")))
+    tp = (settings.get("telegram_api_probe_enabled") or "1").strip()
+    out["telegram_api_probe_enabled"] = tp == "1"
     return out
 
 

@@ -69,27 +69,51 @@ def _chunk_text(s: str, limit: int = 3900) -> list[str]:
 
 async def _format_status(db: Database) -> str:
     bots = await queries.list_monitored_bots(db)
-    if not bots:
-        return "Нет ботов. Добавьте через «Боты» → «+ Добавить бота»."
+    settings = await queries.load_all_settings(db)
+    tg_last = await queries.get_last_telegram_check(db)
+    tg_inc = await queries.get_open_telegram_incident(db)
+
     lines: list[str] = []
-    for b in bots:
-        last = await queries.get_last_check(db, int(b["id"]))
-        inc = await queries.get_open_incident(db, int(b["id"]))
-        st = "выкл" if not b["enabled"] else "вкл"
-        if not last:
-            lines.append(f"- {b['display_name']} (id={b['id']}, {st}): проверок ещё не было")
-            continue
-        ok = "ok" if last["ok"] else "FAIL"
-        lat = last["latency_ms"] if last["latency_ms"] is not None else "?"
-        rl = " (rate_limit)" if last.get("rate_limited") else ""
-        inc_s = " ИНЦИДЕНТ" if inc else ""
-        err = f" — {last['error_text']}" if last["error_text"] else ""
-        lines.append(
-            f"- {b['display_name']} (id={b['id']}, {st}): {ok}{rl}, {last['ts']}, {lat}ms{err}{inc_s}"
-        )
+
+    if not bots:
+        lines.append("Нет ботов. Добавьте через «Боты» → «+ Добавить бота».")
+    else:
+        for b in bots:
+            last = await queries.get_last_check(db, int(b["id"]))
+            inc = await queries.get_open_incident(db, int(b["id"]))
+            st = "выкл" if not b["enabled"] else "вкл"
+            if not last:
+                lines.append(f"- {b['display_name']} (id={b['id']}, {st}): проверок ещё не было")
+                continue
+            ok = "ok" if last["ok"] else "FAIL"
+            lat = last["latency_ms"] if last["latency_ms"] is not None else "?"
+            rl = " (rate_limit)" if last.get("rate_limited") else ""
+            inc_s = " ИНЦИДЕНТ" if inc else ""
+            err = f" — {last['error_text']}" if last["error_text"] else ""
+            lines.append(
+                f"- {b['display_name']} (id={b['id']}, {st}): {ok} (поллинг){rl}, "
+                f"{last['ts']}, {lat}ms{err}{inc_s}"
+            )
+
+    lines.append("---")
+    if settings.get("telegram_api_probe_enabled", True):
+        if not tg_last:
+            tg_line = "Telegram API: проверок ещё не было"
+        else:
+            tg_ok = "ok" if tg_last["ok"] else "FAIL"
+            tg_lat = tg_last["latency_ms"] if tg_last["latency_ms"] is not None else "?"
+            tg_rl = " (rate_limit)" if tg_last.get("rate_limited") else ""
+            tg_err = f" — {tg_last['error_text']}" if tg_last["error_text"] else ""
+            tg_inc_s = " ИНЦИДЕНТ" if tg_inc else ""
+            tg_line = (
+                f"Telegram API: {tg_ok}{tg_rl}, {tg_last['ts']}, {tg_lat}ms{tg_err}{tg_inc_s}"
+            )
+        lines.append(tg_line)
+    else:
+        lines.append("Telegram API: проверка отключена (telegram_api_probe_enabled=0)")
+
     info = get_disk_info(db.path)
     ck_stats = await queries.get_checks_storage_stats(db)
-    lines.append("---")
     lines.append(
         f"Диск: {info.used_pct:.0f}% ({info.used_gb:.1f}/{info.total_gb:.1f} ГБ), "
         f"БД: {info.db_size_mb:.1f} МБ, проверок: {ck_stats['count']}"
@@ -124,7 +148,9 @@ def setup_router() -> Router:
     async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "Botping: мониторинг ваших ботов через getMe.\n"
+            "Botping: мониторинг ваших ботов.\n"
+            "Основная проверка — getUpdates-зонд (409 Conflict = бот реально поллит).\n"
+            "Дополнительная — getMe к admin-боту (доступность Telegram API).\n"
             "Команды: /status, /failures, /settings, /report\n"
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
             "Добавлять и включать/выключать ботов можно в меню «Боты».",
@@ -267,7 +293,7 @@ def setup_router() -> Router:
             await message.answer("Нужно целое число. Повторите ввод или /settings.")
             return
         iv = int(raw)
-        if key == "daily_excel_report_enabled" and iv not in (0, 1):
+        if key in ("daily_excel_report_enabled", "telegram_api_probe_enabled") and iv not in (0, 1):
             await message.answer("Для этого параметра допустимо только 0 (выкл) или 1 (вкл).")
             return
         value = str(iv)
@@ -382,7 +408,7 @@ def setup_router() -> Router:
             res = await check_getme(client, token, float(timeout))
         if not res.ok:
             await message.answer(
-                f"Токен не прошёл getMe: {res.error_text}. Проверьте токен и попробуйте снова."
+                f"Токен невалиден у Telegram: {res.error_text}. Проверьте токен и попробуйте снова."
             )
             return
         new_id = await queries.insert_monitored_bot(db, name, token)
