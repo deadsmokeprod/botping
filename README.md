@@ -46,7 +46,7 @@ docker compose up -d --build
 
    ```dotenv
    # один из:
-   BOTPING_PUBLIC_HOST=198.51.100.42   # IP VPS (HTTP)
+   BOTPING_PUBLIC_HOST=38.00.000.68   # IP VPS (HTTP)
    # или:
    BOTPING_PUBLIC_URL=https://botping.example.com   # если настроили HTTPS через Caddy/nginx
    HEARTBEAT_PORT=8080
@@ -126,7 +126,7 @@ asyncio.create_task(_botping_heartbeat())
 Рекомендую вынести в `.env` / переменные окружения, чтобы не коммитить секрет в репозиторий:
 
 ```dotenv
-BOTPING_URL=http://198.51.100.42:8080/heartbeat
+BOTPING_URL=http://38.00.000.68:8080/heartbeat
 BOTPING_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
