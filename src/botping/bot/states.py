@@ -16,3 +16,12 @@ class QuietHoursStates(StatesGroup):
 
 class ReportStates(StatesGroup):
     waiting_period = State()
+
+
+class AddRouterStates(StatesGroup):
+    waiting_name = State()
+
+
+class AddTargetStates(StatesGroup):
+    waiting_name = State()
+    waiting_address = State()

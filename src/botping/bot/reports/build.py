@@ -29,6 +29,16 @@ async def build_availability_report_bundle(
     audit, a_trunc = await queries.export_settings_audit_for_report(db, start_iso, end_iso)
     tg_checks, tc_trunc = await queries.export_telegram_checks_for_report(db, start_iso, end_iso)
     tg_incidents, ti_trunc = await queries.export_telegram_incidents_overlapping(db, start_iso, end_iso)
+    routers = await queries.list_monitored_routers(db)
+    rt_checks, rtc_trunc = await queries.export_router_target_checks_for_report(
+        db, start_iso, end_iso
+    )
+    r_incidents, ri_trunc = await queries.export_router_incidents_overlapping(
+        db, start_iso, end_iso
+    )
+    rt_incidents, rti_trunc = await queries.export_router_target_incidents_overlapping(
+        db, start_iso, end_iso
+    )
     settings_rows = await queries.list_settings_raw_pairs_for_report(db)
     ck_stats = await queries.get_checks_storage_stats(db)
     now = now_moscow_naive()
@@ -51,11 +61,19 @@ async def build_availability_report_bundle(
         telegram_incidents=tg_incidents,
         telegram_checks_truncated=tc_trunc,
         telegram_incidents_truncated=ti_trunc,
+        routers=routers,
+        router_target_checks=rt_checks,
+        router_incidents=r_incidents,
+        router_target_incidents=rt_incidents,
+        router_checks_truncated=rtc_trunc,
+        router_incidents_truncated=ri_trunc,
+        router_target_incidents_truncated=rti_trunc,
     )
     fn = f"botping_{period_start.strftime('%Y%m%d')}_{period_end.strftime('%Y%m%d')}.xlsx"
     cap = (
         f"Период: {period_start.strftime('%d.%m.%Y')} — {period_end.strftime('%d.%m.%Y')}. "
-        f"Проверок: {len(checks)}, инцидентов: {len(incidents)}."
+        f"Проверок ботов: {len(checks)}, LAN: {len(rt_checks)}, инцидентов: "
+        f"{len(incidents) + len(r_incidents) + len(rt_incidents)}."
     )
     if c_trunc or i_trunc or a_trunc:
         cap += " Часть строк обрезана по лимиту экспорта — см. лист «Сводка»."

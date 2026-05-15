@@ -96,8 +96,19 @@ def build_availability_report(
     telegram_incidents: list[dict[str, Any]] | None = None,
     telegram_checks_truncated: bool = False,
     telegram_incidents_truncated: bool = False,
+    routers: list[dict[str, Any]] | None = None,
+    router_target_checks: list[dict[str, Any]] | None = None,
+    router_incidents: list[dict[str, Any]] | None = None,
+    router_target_incidents: list[dict[str, Any]] | None = None,
+    router_checks_truncated: bool = False,
+    router_incidents_truncated: bool = False,
+    router_target_incidents_truncated: bool = False,
 ) -> bytes:
     telegram_checks = telegram_checks or []
+    routers = routers or []
+    router_target_checks = router_target_checks or []
+    router_incidents = router_incidents or []
+    router_target_incidents = router_target_incidents or []
     telegram_incidents = telegram_incidents or []
 
     wb = Workbook()
@@ -449,6 +460,88 @@ def build_availability_report(
         for c in row:
             c.border = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
             c.alignment = WRAP
+
+    if routers:
+        wsr = wb.create_sheet("Роутеры")
+        wsr.append([
+            "ID",
+            "Имя",
+            "Включён",
+            "Последний heartbeat",
+            "С IP",
+        ])
+        _style_header(wsr, 1, 5)
+        for r in routers:
+            wsr.append([
+                r["id"],
+                r["display_name"],
+                "да" if r["enabled"] else "нет",
+                r.get("last_heartbeat_at") or "—",
+                r.get("last_heartbeat_ip") or "—",
+            ])
+        _autosize(wsr)
+
+    if router_target_checks:
+        wslc = wb.create_sheet("Проверки LAN")
+        wslc.append([
+            "Время",
+            "Роутер",
+            "Цель",
+            "Адрес",
+            "Статус",
+            "мс",
+            "Ошибка",
+            "Тип",
+        ])
+        _style_header(wslc, 1, 8)
+        for r in router_target_checks:
+            wslc.append([
+                r["ts"],
+                r["router_name"],
+                r["target_name"],
+                r["address"],
+                "Живой" if r["ok"] else "Недоступен",
+                r["latency_ms"] if r["latency_ms"] is not None else "",
+                r["error_text"] or "",
+                r.get("check_type") or "lan_push",
+            ])
+        wslc.freeze_panes = "A2"
+        _autosize(wslc)
+
+    if router_incidents or router_target_incidents:
+        wsri = wb.create_sheet("Инциденты сайтов")
+        wsri.append([
+            "Тип",
+            "Объект",
+            "Начало",
+            "Конец",
+            "Длительность",
+            "Ошибка",
+        ])
+        _style_header(wsri, 1, 6)
+        for r in router_incidents:
+            dur = _incident_duration_sec(r, period_end, generated_at)
+            wsri.append([
+                "роутер",
+                r["display_name"],
+                r["started_at"],
+                r["ended_at"] or "",
+                _format_minutes(dur),
+                r["last_error"] or "",
+            ])
+        for r in router_target_incidents:
+            dur = _incident_duration_sec(r, period_end, generated_at)
+            label = f"{r['router_name']} / {r['target_name']} ({r['address']})"
+            wsri.append([
+                "LAN",
+                label,
+                r["started_at"],
+                r["ended_at"] or "",
+                _format_minutes(dur),
+                r["last_error"] or "",
+            ])
+        wsri.freeze_panes = "A2"
+        _autosize(wsri)
 
     buf = io.BytesIO()
     wb.save(buf)

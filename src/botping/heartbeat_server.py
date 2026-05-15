@@ -6,17 +6,19 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Any
+from typing import Any, Literal
 
 from aiohttp import web
 
 from botping.db import queries
 from botping.db.pool import Database
+from botping.heartbeat_payload import parse_heartbeat_payload
 
 logger = logging.getLogger(__name__)
 
 _VALID_HEARTBEAT_RPM = 300  # запас 4x от нормального (1 бот = 2/мин)
 _MIN_SECRET_LEN = 16
+_MAX_HEARTBEAT_BODY = 16384
 _RECENT_SUCCESS_TTL_SEC = 3600
 _SECRETS_CACHE_TTL_SEC = 60
 _SETTINGS_CACHE_TTL_SEC = 30
@@ -59,7 +61,7 @@ class HeartbeatServer:
         self._recent_success: dict[str, float] = {}
         self._blocked_24h: deque[float] = deque()
 
-        self._secrets_cache: list[tuple[int, str]] = []
+        self._secrets_cache: list[tuple[str, int, str]] = []
         self._secrets_cached_at: float = 0.0
 
         self._settings_cache: dict[str, Any] = {}
@@ -84,12 +86,15 @@ class HeartbeatServer:
             self._settings_cached_at = now
         return self._settings_cache
 
-    async def _get_secrets(self) -> list[tuple[int, str]]:
+    async def _get_secrets(self) -> list[tuple[str, int, str]]:
         now = time.time()
         if now - self._secrets_cached_at > _SECRETS_CACHE_TTL_SEC:
-            self._secrets_cache = await queries.list_heartbeat_secrets(self._db)
+            self._secrets_cache = await queries.list_heartbeat_secrets_for_cache(self._db)
             self._secrets_cached_at = now
         return self._secrets_cache
+
+    def invalidate_secrets_cache(self) -> None:
+        self._secrets_cached_at = 0.0
 
     # ---- учёт попыток и бан ----
 
@@ -169,13 +174,15 @@ class HeartbeatServer:
             return web.Response(status=404)
 
         cache = await self._get_secrets()
-        matched_bot_id: int | None = None
-        for bid, sec in cache:
+        matched_kind: Literal["bot", "router"] | None = None
+        matched_id: int | None = None
+        for kind, eid, sec in cache:
             if hmac.compare_digest(secret, sec):
-                matched_bot_id = bid
+                matched_kind = "bot" if kind == "bot" else "router"
+                matched_id = eid
                 break
 
-        if matched_bot_id is None:
+        if matched_id is None:
             hits = self._register_unauth(ip)
             trusted = self._has_recent_success(ip)
             if hits > unauth_rpm:
@@ -199,14 +206,65 @@ class HeartbeatServer:
         if len(dq) > _VALID_HEARTBEAT_RPM:
             return web.Response(status=429)
 
+        if matched_kind == "bot":
+            try:
+                await queries.touch_heartbeat(self._db, matched_id, ip)
+            except Exception:
+                logger.exception("touch_heartbeat failed")
+            self._recent_success[ip] = now
+            self._fails.pop(ip, None)
+            return web.json_response({"ok": True, "bot_id": matched_id})
+
+        # router
+        body = await request.read()
+        if len(body) > _MAX_HEARTBEAT_BODY:
+            return web.json_response({"ok": False, "error": "body_too_large"}, status=413)
         try:
-            await queries.touch_heartbeat(self._db, matched_bot_id, ip)
+            payload = parse_heartbeat_payload(body)
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+
+        try:
+            await queries.touch_router_heartbeat(self._db, matched_id, ip)
         except Exception:
-            logger.exception("touch_heartbeat failed")
+            logger.exception("touch_router_heartbeat failed")
+
+        matched_targets = 0
+        ignored = 0
+        if payload is not None and payload.checks:
+            for item in payload.checks:
+                target = await queries.find_router_target(
+                    self._db,
+                    matched_id,
+                    target_id=item.target_id,
+                    address=item.address,
+                )
+                if target is None or not target.get("enabled", True):
+                    ignored += 1
+                    continue
+                tid = int(target["id"])
+                err = item.error
+                if not item.ok and not err:
+                    err = "unreachable"
+                await queries.apply_router_target_push(
+                    self._db,
+                    tid,
+                    item.ok,
+                    item.latency_ms,
+                    err,
+                )
+                matched_targets += 1
 
         self._recent_success[ip] = now
         self._fails.pop(ip, None)
-        return web.json_response({"ok": True, "bot_id": matched_bot_id})
+        return web.json_response(
+            {
+                "ok": True,
+                "router_id": matched_id,
+                "matched": matched_targets,
+                "ignored": ignored,
+            }
+        )
 
     async def _handle_404(self, request: web.Request) -> web.Response:
         ip = _client_ip(request)
@@ -271,7 +329,7 @@ class HeartbeatServer:
     # ---- сервер ----
 
     def _build_app(self) -> web.Application:
-        app = web.Application(client_max_size=1024)
+        app = web.Application(client_max_size=_MAX_HEARTBEAT_BODY)
         app.router.add_post("/heartbeat", self._handle_heartbeat)
         app.router.add_get("/heartbeat", self._handle_heartbeat)
         # catch-all: любой метод, любой путь — тихий 404

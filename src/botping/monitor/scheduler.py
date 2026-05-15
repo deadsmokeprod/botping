@@ -11,6 +11,7 @@ from botping.db import queries
 from botping.db.pool import Database
 from botping.monitor.checker import probe_getme_api
 from botping.monitor.quiet import in_quiet_hours
+from botping.monitor.router_monitor import run_router_monitor_tick
 from botping.timeutil import MOSCOW_TZ
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,8 @@ async def scheduler_loop(
     admin_bot_token: str,
 ) -> None:
     consecutive: dict[int, int] = {}
+    consecutive_routers: dict[int, int] = {}
+    consecutive_targets: dict[int, int] = {}
 
     while not stop.is_set():
         try:
@@ -193,6 +196,20 @@ async def scheduler_loop(
                                 "Incident opened during quiet hours, alert suppressed: %s",
                                 name,
                             )
+
+            try:
+                await run_router_monitor_tick(
+                    db,
+                    notify,
+                    hb_timeout=hb_timeout,
+                    fail_threshold=fail_threshold,
+                    repeat_sec=repeat_sec,
+                    quiet_down=quiet_down,
+                    consecutive_routers=consecutive_routers,
+                    consecutive_targets=consecutive_targets,
+                )
+            except Exception:
+                logger.exception("router monitor tick failed")
 
         except asyncio.CancelledError:
             raise

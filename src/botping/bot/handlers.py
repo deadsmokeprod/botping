@@ -16,7 +16,9 @@ from botping.bot import keyboards as kb
 from botping.bot.reports.build import build_availability_report_bundle
 from botping.bot.reports.period_parse import parse_period_line
 from botping.bot.settings_help import META, format_key_change_prompt
+from botping.bot.handlers_sites import register_sites_handlers
 from botping.bot.states import AddBotStates, QuietHoursStates, ReportStates, SettingStates
+from botping.monitor.router_monitor import _target_alive
 from botping.bot.ui import edit_or_answer
 from botping.db import queries
 from botping.db.pool import Database, generate_heartbeat_secret
@@ -196,6 +198,41 @@ async def _format_status(db: Database, hb_server: HeartbeatServer | None = None)
 
     info = get_disk_info(db.path)
     ck_stats = await queries.get_checks_storage_stats(db)
+    routers = await queries.list_monitored_routers(db)
+    lines.append("---")
+    lines.append("Сайты (MikroTik):")
+    if not routers:
+        lines.append("Нет роутеров. Добавьте через «Сайты» → «+ Добавить роутер».")
+    else:
+        for r in routers:
+            rid = int(r["id"])
+            st = "вкл" if r["enabled"] else "выкл"
+            age = _heartbeat_age_sec(r)
+            r_inc = await queries.get_open_router_incident(db, rid)
+            inc_s = " ИНЦИДЕНТ" if r_inc else ""
+            if age is None:
+                r_state = "НЕТ ПИНГОВ"
+            elif age <= hb_timeout:
+                r_state = f"ЖИВ, пинг {_format_age_ru(age)} назад"
+            else:
+                r_state = f"НЕДОСТУПЕН, нет пинга {_format_age_ru(age)}"
+            lines.append(f"- {r['display_name']} (id={rid}, {st}): {r_state}{inc_s}")
+            if not r["enabled"]:
+                continue
+            targets = await queries.list_router_targets(db, rid, enabled_only=True)
+            for t in targets:
+                tid = int(t["id"])
+                t_inc = await queries.get_open_router_target_incident(db, tid)
+                t_inc_s = " ИНЦИДЕНТ" if t_inc else ""
+                alive, terr = _target_alive(t, hb_timeout)
+                if alive:
+                    ms = t.get("last_latency_ms")
+                    t_st = f"ЖИВ, {ms} ms" if ms is not None else "ЖИВ"
+                else:
+                    t_st = f"НЕДОСТУПЕН ({terr or '?'})"
+                lines.append(f"  · {t['display_name']} {t['address']}: {t_st}{t_inc_s}")
+
+    lines.append("---")
     lines.append(
         f"Диск: {info.used_pct:.0f}% ({info.used_gb:.1f}/{info.total_gb:.1f} ГБ), "
         f"БД: {info.db_size_mb:.1f} МБ, проверок: {ck_stats['count']}"
@@ -235,7 +272,8 @@ def setup_router() -> Router:
             "Отдельно проверяется доступность Telegram API (getMe к admin-боту).\n"
             "Команды: /status, /failures, /settings, /report\n"
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
-            "Добавить бота: «Боты» → «+ Добавить бота». После добавления покажу сниппет, который надо вставить в ваш бот.",
+            "Добавить бота: «Боты» → «+ Добавить бота».\n"
+            "MikroTik + LAN: «Сайты» → «+ Добавить роутер» → цели → сниппет на роутер.",
             reply_markup=kb.main_menu(),
         )
 
@@ -588,6 +626,7 @@ def setup_router() -> Router:
             "Команды: /status, /failures, /settings"
         )
 
+    register_sites_handlers(router)
     return router
 
 
@@ -606,13 +645,16 @@ async def _failures_text(db: Database, args: str | None) -> str:
                 return "Формат: /failures или /failures 2026-04-01 2026-04-14"
     start_s = start.strftime("%Y-%m-%d %H:%M:%S")
     end_s = end.strftime("%Y-%m-%d %H:%M:%S")
-    items = await queries.list_incidents_in_range(db, start_s, end_s)
+    items = await queries.list_all_incidents_in_range(db, start_s, end_s)
     if not items:
         return f"Сбоев за период {start_s} — {end_s} не найдено."
     lines = [f"Инциденты ({start_s} — {end_s}):", ""]
     for it in items:
         ended = it["ended_at"] or "открыт"
+        et = it.get("entity_type", "bot")
+        eid = it.get("entity_id", "")
         lines.append(
-            f"- {it['display_name']} (bot_id={it['bot_id']}): {it['started_at']} → {ended}\n  {it['last_error']}"
+            f"- [{et}] {it['display_name']} (id={eid}): {it['started_at']} → {ended}\n"
+            f"  {it['last_error']}"
         )
     return "\n".join(lines)

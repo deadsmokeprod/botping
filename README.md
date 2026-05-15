@@ -101,6 +101,31 @@ asyncio.create_task(_botping_heartbeat())
 - По умолчанию — HTTP на порт 8080 + случайный секрет на каждого бота в заголовке `X-Heartbeat-Secret`. Этого достаточно, чтобы чужие не засоряли вашу базу.
 - Для продакшна рекомендуется поверх поднять Caddy/nginx с Let’s Encrypt: тогда трафик зашифрован, а `BOTPING_PUBLIC_URL` станет `https://…`.
 
+## MikroTik и LAN (push + ping)
+
+Мониторинг роутеров и устройств в локальной сети: MikroTik сам пингует IP и шлёт результат на тот же `/heartbeat`.
+
+1. В admin-боте: **Сайты** → **+ Добавить роутер** → добавьте **цели** (IP в LAN).
+2. **Показать сниппет MikroTik** — script + scheduler на 30 с (System → Scripts / Scheduler).
+3. Шаблоны в репозитории: [deploy/mikrotik/](deploy/mikrotik/README.md).
+
+Формат тела запроса (заголовок `X-Heartbeat-Secret` как у ботов):
+
+```json
+{"checks":[{"id":1,"address":"192.168.88.10","ok":true,"ms":12}]}
+```
+
+Цель сопоставляется по `id` из Botping, иначе по `address`. Если роутер не пингует Botping — инцидент по роутеру; если ping до IP не проходит — по цели.
+
+Проверка с curl:
+
+```bash
+curl -s -X POST "http://<VPS>:8080/heartbeat" \
+  -H "X-Heartbeat-Secret: YOUR_ROUTER_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"checks":[{"address":"192.168.88.10","ok":true,"ms":8}]}'
+```
+
 ## Бэкап
 
 Достаточно копировать файл SQLite (остановите сервис или используйте `.backup` в sqlite3 для консистентности).

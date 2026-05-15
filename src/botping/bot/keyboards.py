@@ -15,6 +15,9 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Боты", callback_data="menu:bots"),
             ],
             [
+                InlineKeyboardButton(text="Сайты", callback_data="menu:sites"),
+            ],
+            [
                 InlineKeyboardButton(text="Отчёт Excel", callback_data="menu:report_excel"),
                 InlineKeyboardButton(text="Диск", callback_data="menu:disk"),
             ],
@@ -126,6 +129,73 @@ def confirm_delete(bot_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="Да, удалить", callback_data=f"bot:del:{bot_id}"),
                 InlineKeyboardButton(text="Отмена", callback_data=f"bot:view:{bot_id}"),
+            ],
+        ]
+    )
+
+
+def sites_menu(router_rows: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for rid, name, en in router_rows:
+        flag = "on" if en else "off"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{name} [{flag}]",
+                    callback_data=f"site:view:{rid}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="+ Добавить роутер", callback_data="site:add")])
+    rows.append([InlineKeyboardButton(text="Назад", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def site_detail(router_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    toggle = "Выключить" if enabled else "Включить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Показать сниппет MikroTik", callback_data=f"site:snippet:{router_id}")],
+            [
+                InlineKeyboardButton(text="Показать секрет", callback_data=f"site:secret:{router_id}"),
+                InlineKeyboardButton(text="Сменить секрет", callback_data=f"site:rotate:{router_id}"),
+            ],
+            [InlineKeyboardButton(text="+ Цель (LAN IP)", callback_data=f"site:target_add:{router_id}")],
+            [InlineKeyboardButton(text=toggle, callback_data=f"site:toggle:{router_id}")],
+            [InlineKeyboardButton(text="Удалить роутер", callback_data=f"site:delask:{router_id}")],
+            [InlineKeyboardButton(text="К списку сайтов", callback_data="menu:sites")],
+        ]
+    )
+
+
+def site_target_detail(target_id: int, router_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    toggle = "Выключить" if enabled else "Включить"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=toggle, callback_data=f"site:ttoggle:{target_id}")],
+            [InlineKeyboardButton(text="Удалить цель", callback_data=f"site:tdelask:{target_id}")],
+            [InlineKeyboardButton(text="К роутеру", callback_data=f"site:view:{router_id}")],
+        ]
+    )
+
+
+def confirm_site_delete(router_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить", callback_data=f"site:del:{router_id}"),
+                InlineKeyboardButton(text="Отмена", callback_data=f"site:view:{router_id}"),
+            ],
+        ]
+    )
+
+
+def confirm_target_delete(target_id: int, router_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Да, удалить", callback_data=f"site:tdel:{target_id}"),
+                InlineKeyboardButton(text="Отмена", callback_data=f"site:tview:{target_id}"),
             ],
         ]
     )

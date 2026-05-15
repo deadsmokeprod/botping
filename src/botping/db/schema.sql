@@ -76,6 +76,65 @@ CREATE TABLE IF NOT EXISTS incidents (
 CREATE INDEX IF NOT EXISTS idx_incidents_bot_started ON incidents(bot_id, started_at);
 CREATE INDEX IF NOT EXISTS idx_incidents_open ON incidents(bot_id) WHERE ended_at IS NULL;
 
+-- MikroTik / LAN (push heartbeat + JSON checks)
+CREATE TABLE IF NOT EXISTS monitored_routers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    display_name TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    heartbeat_secret TEXT NOT NULL UNIQUE,
+    last_heartbeat_at TEXT,
+    last_heartbeat_ip TEXT
+);
+
+CREATE TABLE IF NOT EXISTS router_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    router_id INTEGER NOT NULL REFERENCES monitored_routers(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    address TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_ok_at TEXT,
+    last_latency_ms INTEGER,
+    last_error TEXT,
+    UNIQUE(router_id, address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_router_targets_router ON router_targets(router_id);
+
+CREATE TABLE IF NOT EXISTS router_target_checks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id INTEGER NOT NULL REFERENCES router_targets(id) ON DELETE CASCADE,
+    ts TEXT NOT NULL DEFAULT (datetime('now')),
+    ok INTEGER NOT NULL,
+    latency_ms INTEGER,
+    error_text TEXT,
+    check_type TEXT NOT NULL DEFAULT 'lan_push'
+);
+
+CREATE INDEX IF NOT EXISTS idx_router_target_checks_target_ts ON router_target_checks(target_id, ts);
+
+CREATE TABLE IF NOT EXISTS router_incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    router_id INTEGER NOT NULL REFERENCES monitored_routers(id) ON DELETE CASCADE,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    last_error TEXT,
+    last_alert_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_router_incidents_open ON router_incidents(router_id) WHERE ended_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS router_target_incidents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_id INTEGER NOT NULL REFERENCES router_targets(id) ON DELETE CASCADE,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    ended_at TEXT,
+    last_error TEXT,
+    last_alert_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_router_target_incidents_open ON router_target_incidents(target_id) WHERE ended_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS settings_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     -- приложение пишет Europe/Moscow

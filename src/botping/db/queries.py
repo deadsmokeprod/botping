@@ -148,6 +148,35 @@ async def list_heartbeat_secrets(db: Database) -> list[tuple[int, str]]:
     return [(int(r[0]), str(r[1])) for r in rows]
 
 
+async def list_heartbeat_secrets_for_cache(
+    db: Database,
+) -> list[tuple[str, int, str]]:
+    """(kind, entity_id, secret) — kind: 'bot' | 'router'."""
+    bots = await list_heartbeat_secrets(db)
+    out: list[tuple[str, int, str]] = [("bot", bid, sec) for bid, sec in bots]
+    rows = await db.fetchall(
+        "SELECT id, heartbeat_secret FROM monitored_routers WHERE heartbeat_secret != ''"
+    )
+    for r in rows:
+        out.append(("router", int(r[0]), str(r[1])))
+    return out
+
+
+async def heartbeat_secret_in_use(db: Database, secret: str, exclude: str | None = None) -> bool:
+    ex = exclude or ""
+    r = await db.fetchone(
+        "SELECT 1 FROM monitored_bots WHERE heartbeat_secret = ? AND heartbeat_secret != ? LIMIT 1",
+        (secret, ex),
+    )
+    if r:
+        return True
+    r2 = await db.fetchone(
+        "SELECT 1 FROM monitored_routers WHERE heartbeat_secret = ? AND heartbeat_secret != ? LIMIT 1",
+        (secret, ex),
+    )
+    return r2 is not None
+
+
 async def update_bot_enabled(db: Database, bot_id: int, enabled: bool) -> None:
     await db.execute(
         "UPDATE monitored_bots SET enabled = ? WHERE id = ?",
@@ -638,6 +667,536 @@ async def load_all_settings(db: Database) -> dict[str, Any]:
     merged = dict(DEFAULT_SETTINGS)
     merged.update({str(r[0]): str(r[1]) for r in rows})
     return parse_settings_row(merged)
+
+
+# ── Monitored routers / LAN targets ───────────────────────────────────
+
+_ROUTER_COLUMNS = (
+    "id, display_name, enabled, created_at, "
+    "heartbeat_secret, last_heartbeat_at, last_heartbeat_ip"
+)
+
+_TARGET_COLUMNS = (
+    "id, router_id, display_name, address, enabled, "
+    "last_ok_at, last_latency_ms, last_error"
+)
+
+
+def _row_to_router(r: Any) -> dict[str, Any]:
+    return {
+        "id": r[0],
+        "display_name": r[1],
+        "enabled": bool(r[2]),
+        "created_at": r[3],
+        "heartbeat_secret": r[4] or "",
+        "last_heartbeat_at": r[5],
+        "last_heartbeat_ip": r[6],
+    }
+
+
+def _row_to_target(r: Any) -> dict[str, Any]:
+    return {
+        "id": r[0],
+        "router_id": r[1],
+        "display_name": r[2],
+        "address": r[3],
+        "enabled": bool(r[4]),
+        "last_ok_at": r[5],
+        "last_latency_ms": r[6],
+        "last_error": r[7],
+    }
+
+
+async def list_monitored_routers(db: Database) -> list[dict[str, Any]]:
+    rows = await db.fetchall(
+        f"SELECT {_ROUTER_COLUMNS} FROM monitored_routers ORDER BY id"
+    )
+    return [_row_to_router(r) for r in rows]
+
+
+async def get_monitored_router(db: Database, router_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        f"SELECT {_ROUTER_COLUMNS} FROM monitored_routers WHERE id = ?",
+        (router_id,),
+    )
+    if not r:
+        return None
+    return _row_to_router(r)
+
+
+async def insert_monitored_router(
+    db: Database, display_name: str, heartbeat_secret: str
+) -> int:
+    row = await db.write_returning_one(
+        """
+        INSERT INTO monitored_routers
+            (display_name, enabled, created_at, heartbeat_secret)
+        VALUES (?, 1, ?, ?) RETURNING id
+        """,
+        (display_name.strip(), now_moscow_iso(), heartbeat_secret),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def touch_router_heartbeat(db: Database, router_id: int, ip: str | None) -> None:
+    await db.execute(
+        "UPDATE monitored_routers SET last_heartbeat_at = ?, last_heartbeat_ip = ? WHERE id = ?",
+        (now_moscow_iso(), (ip or "")[:64] or None, router_id),
+    )
+
+
+async def regenerate_router_heartbeat_secret(
+    db: Database, router_id: int, new_secret: str
+) -> None:
+    await db.execute(
+        "UPDATE monitored_routers SET heartbeat_secret = ? WHERE id = ?",
+        (new_secret, router_id),
+    )
+
+
+async def update_router_enabled(db: Database, router_id: int, enabled: bool) -> None:
+    await db.execute(
+        "UPDATE monitored_routers SET enabled = ? WHERE id = ?",
+        (1 if enabled else 0, router_id),
+    )
+
+
+async def delete_monitored_router(db: Database, router_id: int) -> None:
+    await db.execute("DELETE FROM monitored_routers WHERE id = ?", (router_id,))
+
+
+async def list_router_targets(
+    db: Database, router_id: int, *, enabled_only: bool = False
+) -> list[dict[str, Any]]:
+    sql = f"SELECT {_TARGET_COLUMNS} FROM router_targets WHERE router_id = ?"
+    params: tuple[Any, ...] = (router_id,)
+    if enabled_only:
+        sql += " AND enabled = 1"
+    sql += " ORDER BY id"
+    rows = await db.fetchall(sql, params)
+    return [_row_to_target(r) for r in rows]
+
+
+async def get_router_target(db: Database, target_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        f"SELECT {_TARGET_COLUMNS} FROM router_targets WHERE id = ?",
+        (target_id,),
+    )
+    if not r:
+        return None
+    return _row_to_target(r)
+
+
+async def insert_router_target(
+    db: Database, router_id: int, display_name: str, address: str
+) -> int:
+    row = await db.write_returning_one(
+        """
+        INSERT INTO router_targets (router_id, display_name, address, enabled)
+        VALUES (?, ?, ?, 1) RETURNING id
+        """,
+        (router_id, display_name.strip(), address.strip()),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def update_router_target_enabled(
+    db: Database, target_id: int, enabled: bool
+) -> None:
+    await db.execute(
+        "UPDATE router_targets SET enabled = ? WHERE id = ?",
+        (1 if enabled else 0, target_id),
+    )
+
+
+async def delete_router_target(db: Database, target_id: int) -> None:
+    await db.execute("DELETE FROM router_targets WHERE id = ?", (target_id,))
+
+
+async def find_router_target(
+    db: Database,
+    router_id: int,
+    *,
+    target_id: int | None = None,
+    address: str | None = None,
+) -> dict[str, Any] | None:
+    if target_id is not None:
+        r = await db.fetchone(
+            f"SELECT {_TARGET_COLUMNS} FROM router_targets WHERE router_id = ? AND id = ?",
+            (router_id, target_id),
+        )
+        if r:
+            return _row_to_target(r)
+    if address:
+        addr = address.strip()
+        rows = await db.fetchall(
+            f"SELECT {_TARGET_COLUMNS} FROM router_targets WHERE router_id = ?",
+            (router_id,),
+        )
+        addr_lower = addr.lower()
+        for row in rows:
+            t = _row_to_target(row)
+            if str(t["address"]).strip().lower() == addr_lower:
+                return t
+    return None
+
+
+async def apply_router_target_push(
+    db: Database,
+    target_id: int,
+    ok: bool,
+    latency_ms: int | None,
+    error_text: str | None,
+) -> None:
+    ts = now_moscow_iso()
+    err_val = None if ok else ((error_text or "")[:500] or "unreachable")
+    await db.execute(
+        """
+        UPDATE router_targets
+        SET last_ok_at = ?, last_latency_ms = ?, last_error = ?
+        WHERE id = ?
+        """,
+        (ts, latency_ms, err_val, target_id),
+    )
+    await insert_router_target_check(
+        db, target_id, ok, latency_ms, error_text, check_type="lan_push"
+    )
+
+
+async def insert_router_target_check(
+    db: Database,
+    target_id: int,
+    ok: bool,
+    latency_ms: int | None,
+    error_text: str | None,
+    check_type: str = "lan_push",
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO router_target_checks (target_id, ok, latency_ms, error_text, ts, check_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            target_id,
+            1 if ok else 0,
+            latency_ms,
+            (error_text or "")[:500],
+            now_moscow_iso(),
+            check_type,
+        ),
+    )
+
+
+async def open_router_incident(db: Database, router_id: int, last_error: str | None) -> int:
+    ts = now_moscow_iso()
+    row = await db.write_returning_one(
+        """
+        INSERT INTO router_incidents (router_id, last_error, started_at, last_alert_at)
+        VALUES (?, ?, ?, ?) RETURNING id
+        """,
+        (router_id, (last_error or "")[:500], ts, ts),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def get_open_router_incident(db: Database, router_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, router_id, started_at, ended_at, last_error, last_alert_at
+        FROM router_incidents WHERE router_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1
+        """,
+        (router_id,),
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "router_id": r[1],
+        "started_at": r[2],
+        "ended_at": r[3],
+        "last_error": r[4],
+        "last_alert_at": r[5],
+    }
+
+
+async def update_router_incident_error(db: Database, incident_id: int, last_error: str) -> None:
+    await db.execute(
+        "UPDATE router_incidents SET last_error = ? WHERE id = ?",
+        ((last_error or "")[:500], incident_id),
+    )
+
+
+async def touch_router_incident_alert(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE router_incidents SET last_alert_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def close_router_incident(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE router_incidents SET ended_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def open_router_target_incident(
+    db: Database, target_id: int, last_error: str | None
+) -> int:
+    ts = now_moscow_iso()
+    row = await db.write_returning_one(
+        """
+        INSERT INTO router_target_incidents (target_id, last_error, started_at, last_alert_at)
+        VALUES (?, ?, ?, ?) RETURNING id
+        """,
+        (target_id, (last_error or "")[:500], ts, ts),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def get_open_router_target_incident(
+    db: Database, target_id: int
+) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, target_id, started_at, ended_at, last_error, last_alert_at
+        FROM router_target_incidents WHERE target_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1
+        """,
+        (target_id,),
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "target_id": r[1],
+        "started_at": r[2],
+        "ended_at": r[3],
+        "last_error": r[4],
+        "last_alert_at": r[5],
+    }
+
+
+async def update_router_target_incident_error(
+    db: Database, incident_id: int, last_error: str
+) -> None:
+    await db.execute(
+        "UPDATE router_target_incidents SET last_error = ? WHERE id = ?",
+        ((last_error or "")[:500], incident_id),
+    )
+
+
+async def touch_router_target_incident_alert(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE router_target_incidents SET last_alert_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def close_router_target_incident(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE router_target_incidents SET ended_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def list_all_incidents_in_range(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> list[dict[str, Any]]:
+    """Инциденты ботов, роутеров и LAN-целей за период."""
+    out: list[dict[str, Any]] = []
+    bot_rows = await db.fetchall(
+        """
+        SELECT i.id, i.bot_id, b.display_name, i.started_at, i.ended_at, i.last_error
+        FROM incidents i
+        JOIN monitored_bots b ON b.id = i.bot_id
+        WHERE i.started_at >= ? AND i.started_at <= ?
+        ORDER BY i.started_at DESC LIMIT 200
+        """,
+        (start_iso, end_iso),
+    )
+    for r in bot_rows:
+        out.append(
+            {
+                "entity_type": "bot",
+                "id": r[0],
+                "entity_id": r[1],
+                "display_name": r[2],
+                "started_at": r[3],
+                "ended_at": r[4],
+                "last_error": r[5] or "",
+            }
+        )
+    router_rows = await db.fetchall(
+        """
+        SELECT i.id, i.router_id, r.display_name, i.started_at, i.ended_at, i.last_error
+        FROM router_incidents i
+        JOIN monitored_routers r ON r.id = i.router_id
+        WHERE i.started_at >= ? AND i.started_at <= ?
+        ORDER BY i.started_at DESC LIMIT 200
+        """,
+        (start_iso, end_iso),
+    )
+    for r in router_rows:
+        out.append(
+            {
+                "entity_type": "router",
+                "id": r[0],
+                "entity_id": r[1],
+                "display_name": r[2],
+                "started_at": r[3],
+                "ended_at": r[4],
+                "last_error": r[5] or "",
+            }
+        )
+    target_rows = await db.fetchall(
+        """
+        SELECT i.id, i.target_id, t.display_name, r.display_name, t.address,
+               i.started_at, i.ended_at, i.last_error
+        FROM router_target_incidents i
+        JOIN router_targets t ON t.id = i.target_id
+        JOIN monitored_routers r ON r.id = t.router_id
+        WHERE i.started_at >= ? AND i.started_at <= ?
+        ORDER BY i.started_at DESC LIMIT 200
+        """,
+        (start_iso, end_iso),
+    )
+    for r in target_rows:
+        out.append(
+            {
+                "entity_type": "target",
+                "id": r[0],
+                "entity_id": r[1],
+                "display_name": f"{r[3]} / {r[2]} ({r[4]})",
+                "started_at": r[5],
+                "ended_at": r[6],
+                "last_error": r[7] or "",
+            }
+        )
+    out.sort(key=lambda x: str(x["started_at"]), reverse=True)
+    return out[:500]
+
+
+EXPORT_ROUTER_TARGET_CHECKS_LIMIT = 200_000
+
+
+async def export_router_target_checks_for_report(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_ROUTER_TARGET_CHECKS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT c.id, c.target_id, t.display_name, r.display_name, t.address,
+               c.ts, c.ok, c.latency_ms, c.error_text, c.check_type
+        FROM router_target_checks c
+        JOIN router_targets t ON t.id = c.target_id
+        JOIN monitored_routers r ON r.id = t.router_id
+        WHERE c.ts >= ? AND c.ts <= ?
+        ORDER BY c.ts ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_ROUTER_TARGET_CHECKS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_ROUTER_TARGET_CHECKS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "target_id": r[1],
+            "target_name": r[2],
+            "router_name": r[3],
+            "address": r[4],
+            "ts": r[5],
+            "ok": bool(r[6]),
+            "latency_ms": r[7],
+            "error_text": r[8] or "",
+            "check_type": r[9] or "lan_push",
+        }
+        for r in rows
+    ]
+    return out, truncated
+
+
+async def export_router_incidents_overlapping(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_INCIDENTS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT i.id, i.router_id, r.display_name, i.started_at, i.ended_at, i.last_error, i.last_alert_at
+        FROM router_incidents i
+        JOIN monitored_routers r ON r.id = i.router_id
+        WHERE (i.ended_at IS NULL OR i.ended_at >= ?) AND i.started_at <= ?
+        ORDER BY i.started_at ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_INCIDENTS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_INCIDENTS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "router_id": r[1],
+            "display_name": r[2],
+            "started_at": r[3],
+            "ended_at": r[4],
+            "last_error": r[5] or "",
+            "last_alert_at": r[6],
+        }
+        for r in rows
+    ]
+    return out, truncated
+
+
+async def export_router_target_incidents_overlapping(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_INCIDENTS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT i.id, i.target_id, t.display_name, r.display_name, t.address,
+               i.started_at, i.ended_at, i.last_error, i.last_alert_at
+        FROM router_target_incidents i
+        JOIN router_targets t ON t.id = i.target_id
+        JOIN monitored_routers r ON r.id = t.router_id
+        WHERE (i.ended_at IS NULL OR i.ended_at >= ?) AND i.started_at <= ?
+        ORDER BY i.started_at ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_INCIDENTS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_INCIDENTS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "target_id": r[1],
+            "target_name": r[2],
+            "router_name": r[3],
+            "address": r[4],
+            "started_at": r[5],
+            "ended_at": r[6],
+            "last_error": r[7] or "",
+            "last_alert_at": r[8],
+        }
+        for r in rows
+    ]
+    return out, truncated
 
 
 # ── Disk guard: cleanup queries ──────────────────────────────────────
