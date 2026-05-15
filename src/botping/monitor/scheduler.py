@@ -12,31 +12,13 @@ from botping.db.pool import Database
 from botping.monitor.checker import probe_getme_api
 from botping.monitor.quiet import in_quiet_hours
 from botping.monitor.router_monitor import run_router_monitor_tick
+from botping.monitor.util import NotifyFn, format_age, parse_sqlite_ts
 from botping.timeutil import MOSCOW_TZ
 
 logger = logging.getLogger(__name__)
 
-NotifyFn = Callable[[str], Awaitable[None]]
-
-
-def _parse_sqlite_ts(s: str | None) -> datetime | None:
-    if not s:
-        return None
-    try:
-        naive = datetime.strptime(s, "%Y-%m-%d %H:%M:%S")
-        return naive.replace(tzinfo=MOSCOW_TZ)
-    except ValueError:
-        return None
-
-
-def _format_age(sec: int) -> str:
-    if sec < 60:
-        return f"{sec} с"
-    if sec < 3600:
-        return f"{sec // 60} мин"
-    h = sec // 3600
-    m = (sec % 3600) // 60
-    return f"{h} ч {m} мин" if m else f"{h} ч"
+_parse_sqlite_ts = parse_sqlite_ts
+_format_age = format_age
 
 
 async def _run_telegram_api_probe(

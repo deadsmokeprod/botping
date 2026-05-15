@@ -5,14 +5,14 @@ from datetime import datetime
 
 from botping.db import queries
 from botping.db.pool import Database
-from botping.monitor.scheduler import NotifyFn, _format_age, _parse_sqlite_ts
+from botping.monitor.util import NotifyFn, format_age, parse_sqlite_ts
 from botping.timeutil import MOSCOW_TZ
 
 logger = logging.getLogger(__name__)
 
 
 def _ts_age_sec(ts: str | None) -> int | None:
-    last = _parse_sqlite_ts(ts)
+    last = parse_sqlite_ts(ts)
     if last is None:
         return None
     now = datetime.now(MOSCOW_TZ)
@@ -24,7 +24,7 @@ def _target_alive(t: dict, hb_timeout: int) -> tuple[bool, str | None]:
     if age is None:
         return False, "нет данных от роутера"
     if age > hb_timeout:
-        return False, f"устарели данные {_format_age(age)}"
+        return False, f"устарели данные {format_age(age)}"
     err = (t.get("last_error") or "").strip()
     if err:
         return False, err
@@ -58,7 +58,7 @@ async def run_router_monitor_tick(
             r_err = "нет ни одного heartbeat"
         else:
             router_alive = age <= hb_timeout
-            r_err = None if router_alive else f"нет heartbeat {_format_age(age)}"
+            r_err = None if router_alive else f"нет heartbeat {format_age(age)}"
 
         if router_alive:
             consecutive_routers[rid] = 0
@@ -73,7 +73,7 @@ async def run_router_monitor_tick(
             if open_r_inc:
                 iid = int(open_r_inc["id"])
                 await queries.update_router_incident_error(db, iid, r_err or "")
-                last_alert = _parse_sqlite_ts(str(open_r_inc["last_alert_at"]))
+                last_alert = parse_sqlite_ts(str(open_r_inc["last_alert_at"]))
                 now = datetime.now(MOSCOW_TZ)
                 elapsed = (now - last_alert).total_seconds() if last_alert else repeat_sec + 1
                 if elapsed >= repeat_sec and not quiet_down:
@@ -129,7 +129,7 @@ async def run_router_monitor_tick(
                     await queries.update_router_target_incident_error(
                         db, iid, err_text or ""
                     )
-                    last_alert = _parse_sqlite_ts(str(open_t_inc["last_alert_at"]))
+                    last_alert = parse_sqlite_ts(str(open_t_inc["last_alert_at"]))
                     now = datetime.now(MOSCOW_TZ)
                     elapsed = (
                         (now - last_alert).total_seconds() if last_alert else repeat_sec + 1
