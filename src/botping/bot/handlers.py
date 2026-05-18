@@ -13,6 +13,7 @@ from aiogram.fsm.state import default_state
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from botping.bot import keyboards as kb
+from botping.bot.commands import refresh_chat_menu_button
 from botping.bot.reports.build import build_availability_report_bundle
 from botping.bot.reports.period_parse import parse_period_line
 from botping.bot.settings_help import META, format_key_change_prompt
@@ -276,6 +277,11 @@ def setup_router() -> Router:
     @router.message(Command("start"))
     async def cmd_start(message: Message, state: FSMContext) -> None:
         await state.clear()
+        if message.chat.type == "private":
+            try:
+                await refresh_chat_menu_button(message.bot, message.chat.id)
+            except Exception:
+                logger.exception("Не удалось обновить кнопку меню для chat_id=%s", message.chat.id)
         await message.answer(
             "Botping: мониторинг ваших ботов через heartbeat.\n"
             "Каждый ваш бот сам раз в 30 секунд пингует Botping. Нет пинга — инцидент.\n"

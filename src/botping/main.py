@@ -34,8 +34,12 @@ async def _amain() -> None:
     logger.info("Загружено admin_chat_ids: %s шт.", len(settings.admin_chat_ids))
 
     bot = Bot(settings.admin_bot_token)
-    if await register_bot_commands(bot):
-        logger.info("Команды Telegram зарегистрированы (%d шт.)", len(BOT_COMMANDS))
+    if await register_bot_commands(bot, admin_chat_ids=settings.admin_chat_ids):
+        logger.info(
+            "Команды Telegram зарегистрированы (%d шт., menu button для %d чатов)",
+            len(BOT_COMMANDS),
+            len(settings.admin_chat_ids),
+        )
     else:
         logger.warning("Бот запущен без меню команд в Telegram")
     dp = Dispatcher(storage=MemoryStorage())
