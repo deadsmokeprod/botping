@@ -284,8 +284,11 @@ def setup_router() -> Router:
                 logger.exception(
                     "Не удалось обновить команды/меню для chat_id=%s", message.chat.id
                 )
-            rm = await message.answer("\u200b", reply_markup=ReplyKeyboardRemove())
-            await rm.delete()
+            try:
+                rm = await message.answer(".", reply_markup=ReplyKeyboardRemove())
+                await rm.delete()
+            except Exception:
+                logger.exception("Не удалось снять reply-клавиатуру")
         await message.answer(
             "Botping: мониторинг ваших ботов через heartbeat.\n"
             "Каждый ваш бот сам раз в 30 секунд пингует Botping. Нет пинга — инцидент.\n"
