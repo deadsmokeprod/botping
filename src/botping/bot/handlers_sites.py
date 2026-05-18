@@ -20,17 +20,82 @@ from botping.db import queries
 from botping.db.pool import Database, generate_heartbeat_secret
 from botping.heartbeat_server import HeartbeatServer
 from botping.mikrotik.snippet import build_routeros_snippet
+from botping.monitor.router_monitor import _target_alive
+
+ROUTERS_MENU_INTRO = (
+    "Роутеры и устройства (MikroTik)\n\n"
+    "Как настроить:\n"
+    "1) Добавьте роутер (имя площадки).\n"
+    "2) Укажите устройства в LAN — IP, которые MikroTik будет пинговать.\n"
+    "3) Установите скрипт на роутер (кнопка «Установка на MikroTik»).\n"
+    "4) Проверьте /status — роутер и устройства должны быть ЖИВ.\n"
+)
+
+SETUP_CHECKLIST = (
+    "Чеклист на роутере (Winbox / WebFig):\n"
+    "• System → Scripts → создать/заменить botping-lan\n"
+    "• System → Scheduler → каждые 30 с, policy: read,write,policy,test\n"
+    "• Убедиться, что с роутера есть интернет до VPS\n"
+    "• В боте: /status — блок «Роутеры и устройства»"
+)
 
 
 def _target_status_line(t: dict, hb_timeout: int) -> str:
-    from botping.monitor.router_monitor import _target_alive
-
     alive, err = _target_alive(t, hb_timeout)
     if alive:
         ms = t.get("last_latency_ms")
-        ms_s = f", {ms} ms" if ms is not None else ""
-        return f"ЖИВ{ms_s}"
-    return f"НЕДОСТУПЕН ({err or '?'})"
+        return f"ЖИВ{f', {ms} ms' if ms is not None else ''}"
+    return f"НЕТ ({err or '?'})"
+
+
+def _target_button_label(t: dict, hb_timeout: int) -> str:
+    st = _target_status_line(t, hb_timeout)
+    name = str(t["display_name"])[:20]
+    addr = str(t["address"])
+    return f"{st} · {name} · {addr}"
+
+
+async def _router_summary_label(
+    db: Database, r: dict, hb_timeout: int
+) -> str:
+    rid = int(r["id"])
+    age = heartbeat_age_sec(r)
+    if age is None:
+        r_st = "нет пингов"
+    elif age <= hb_timeout:
+        r_st = "ЖИВ"
+    else:
+        r_st = "НЕТ пинга"
+    if not r["enabled"]:
+        r_st = f"{r_st}, выкл"
+    targets = await queries.list_router_targets(db, rid, enabled_only=True)
+    if not targets:
+        ok_s = "0 целей"
+    else:
+        ok_n = sum(1 for t in targets if _target_alive(t, hb_timeout)[0])
+        ok_s = f"{ok_n}/{len(targets)} OK"
+    name = str(r["display_name"])[:28]
+    return f"{name} · {r_st} · {ok_s}"
+
+
+async def _build_router_menu_rows(db: Database) -> list[tuple[int, str]]:
+    settings = await queries.load_all_settings(db)
+    hb_timeout = int(settings["heartbeat_timeout_sec"])
+    rows = await queries.list_monitored_routers(db)
+    out: list[tuple[int, str]] = []
+    for r in rows:
+        out.append((int(r["id"]), await _router_summary_label(db, r, hb_timeout)))
+    return out
+
+
+async def _target_buttons_for_router(
+    db: Database, router_id: int, hb_timeout: int
+) -> list[tuple[int, str]]:
+    targets = await queries.list_router_targets(db, router_id)
+    return [
+        (int(t["id"]), _target_button_label(t, hb_timeout))
+        for t in targets
+    ]
 
 
 async def _format_site_detail(db: Database, router_id: int) -> str | None:
@@ -49,18 +114,18 @@ async def _format_site_detail(db: Database, router_id: int) -> str | None:
     lines = [
         f"Роутер: {r['display_name']}",
         f"id={router_id}",
-        f"Статус: {'вкл' if r['enabled'] else 'выкл'}",
+        f"Мониторинг: {'включён' if r['enabled'] else 'выключен (пинги всё равно принимаются)'}",
         f"Heartbeat: {hb_state}",
         f"Последний пинг: {r.get('last_heartbeat_at') or '—'}",
         f"С IP: {r.get('last_heartbeat_ip') or '—'}",
         f"Секрет: {mask_secret(str(r['heartbeat_secret']))}",
         f"URL: {public_host_from_env()}/heartbeat",
         "",
-        "Цели LAN:",
+        "Устройства в LAN (нажмите кнопку ниже для карточки):",
     ]
     targets = await queries.list_router_targets(db, router_id)
     if not targets:
-        lines.append("  (нет — добавьте «+ Цель»)")
+        lines.append("  (нет — нажмите «+ Устройство в LAN»)")
     else:
         for t in targets:
             tid = int(t["id"])
@@ -72,28 +137,64 @@ async def _format_site_detail(db: Database, router_id: int) -> str | None:
                 f"{_target_status_line(t, hb_timeout)}{inc_s}"
             )
     lines.append("")
-    lines.append("После изменения целей обновите script на MikroTik («Показать сниппет»).")
+    if targets:
+        lines.append("После смены списка IP обновите скрипт: «Установка на MikroTik».")
+    else:
+        lines.append("Шаг 2: добавьте устройство (IP в LAN), затем «Установка на MikroTik».")
     return "\n".join(lines)
 
 
+async def _send_router_setup(
+    message_or_cq: Message | CallbackQuery,
+    db: Database,
+    router_id: int,
+) -> None:
+    r = await queries.get_monitored_router(db, router_id)
+    if not r:
+        return
+    targets = await queries.list_router_targets(db, router_id)
+    snippet = build_routeros_snippet(
+        public_host_from_env(), str(r["heartbeat_secret"]), targets
+    )
+    header = (
+        f"Шаг 3: установка на MikroTik — {r['display_name']}\n\n"
+        f"{SETUP_CHECKLIST}\n\n"
+        f"Script (System → Scripts → botping-lan):\n"
+    )
+    if isinstance(message_or_cq, CallbackQuery):
+        msg = message_or_cq.message
+        assert msg is not None
+        await msg.answer(header)
+        for part in chunk_text(snippet):
+            await msg.answer(f"<pre>{part}</pre>", parse_mode="HTML")
+    else:
+        await message_or_cq.answer(header)
+        for part in chunk_text(snippet):
+            await message_or_cq.answer(f"<pre>{part}</pre>", parse_mode="HTML")
+
+
+async def _show_routers_menu(cq: CallbackQuery, db: Database, state: FSMContext) -> None:
+    await state.clear()
+    menu_rows = await _build_router_menu_rows(db)
+    text = ROUTERS_MENU_INTRO
+    if not menu_rows:
+        text += "\nПока нет роутеров — нажмите «+ Добавить роутер»."
+    await edit_or_answer(cq, text, reply_markup=kb.routers_menu(menu_rows))
+
+
 def register_sites_handlers(router: Router) -> None:
-    @router.callback_query(F.data == "menu:sites")
-    async def on_menu_sites(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
-        await state.clear()
-        rows = await queries.list_monitored_routers(db)
-        site_rows = [(int(r["id"]), str(r["display_name"]), bool(r["enabled"])) for r in rows]
-        await edit_or_answer(
-            cq,
-            "Сайты (MikroTik + LAN):\n"
-            "Роутер шлёт heartbeat и результаты ping по IP в вашей сети.",
-            reply_markup=kb.sites_menu(site_rows),
-        )
+    @router.callback_query(F.data.in_({"menu:routers", "menu:sites"}))
+    async def on_menu_routers(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
+        await _show_routers_menu(cq, db, state)
         await cq.answer()
 
     @router.callback_query(F.data == "site:add")
     async def on_site_add(cq: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(AddRouterStates.waiting_name)
-        await cq.message.answer("Введите имя роутера / площадки (например «Офис»).")
+        await cq.message.answer(
+            "Шаг 1/3: введите имя роутера или площадки\n"
+            "(например «Офис» или «192.168.99.1»)."
+        )
         await cq.answer()
 
     @router.message(AddRouterStates.waiting_name, F.text)
@@ -112,16 +213,11 @@ def register_sites_handlers(router: Router) -> None:
             hb_server.invalidate_secrets_cache()
         await state.clear()
         await message.answer(
-            f"Роутер добавлен: {name} (id={new_id}).\n"
-            "Добавьте LAN-цели и установите сниппет на MikroTik.",
-            reply_markup=kb.main_menu(),
+            f"Роутер «{name}» создан (id={new_id}).\n\n"
+            "Шаг 2/3: добавьте устройства в LAN (IP, которые MikroTik будет пинговать).\n"
+            "Шаг 3/3: установите скрипт на роутер (кнопка в карточке).",
+            reply_markup=kb.router_after_create(new_id),
         )
-        snippet = build_routeros_snippet(public_host_from_env(), secret, [])
-        for part in chunk_text(
-            "Сниппет MikroTik (после добавления целей запросите снова из карточки роутера):\n\n"
-            + snippet
-        ):
-            await message.answer(part)
 
     @router.callback_query(F.data.startswith("site:view:"))
     async def on_site_view(cq: CallbackQuery, db: Database) -> None:
@@ -132,25 +228,33 @@ def register_sites_handlers(router: Router) -> None:
             return
         r = await queries.get_monitored_router(db, rid)
         assert r is not None
-        await edit_or_answer(cq, text, reply_markup=kb.site_detail(rid, bool(r["enabled"])))
+        settings = await queries.load_all_settings(db)
+        hb_timeout = int(settings["heartbeat_timeout_sec"])
+        target_btns = await _target_buttons_for_router(db, rid, hb_timeout)
+        await edit_or_answer(
+            cq,
+            text,
+            reply_markup=kb.router_detail(rid, bool(r["enabled"]), target_btns),
+        )
         await cq.answer()
 
-    @router.callback_query(F.data.startswith("site:snippet:"))
-    async def on_site_snippet(cq: CallbackQuery, db: Database) -> None:
+    @router.callback_query(
+        F.data.startswith("site:setup:") | F.data.startswith("site:snippet:")
+    )
+    async def on_site_setup(cq: CallbackQuery, db: Database) -> None:
         rid = int(cq.data.split(":")[2])
         r = await queries.get_monitored_router(db, rid)
         if not r:
             await cq.answer("Не найден", show_alert=True)
             return
         targets = await queries.list_router_targets(db, rid)
-        snippet = build_routeros_snippet(
-            public_host_from_env(), str(r["heartbeat_secret"]), targets
-        )
-        await cq.message.answer(
-            f"Сниппет для {r['display_name']}. System → Scripts → botping-lan, затем Scheduler 30с."
-        )
-        for part in chunk_text(snippet):
-            await cq.message.answer(f"<pre>{part}</pre>", parse_mode="HTML")
+        if not targets:
+            await cq.answer(
+                "Сначала добавьте хотя бы одно устройство (IP в LAN).",
+                show_alert=True,
+            )
+            return
+        await _send_router_setup(cq, db, rid)
         await cq.answer()
 
     @router.callback_query(F.data.startswith("site:secret:"))
@@ -185,7 +289,7 @@ def register_sites_handlers(router: Router) -> None:
             hb_server.invalidate_secrets_cache()
         await cq.message.answer(
             f"Новый секрет для {r['display_name']}:\n<code>{new_secret}</code>\n"
-            "Обновите script на MikroTik.",
+            "Обновите script на MikroTik («Установка на MikroTik»).",
             parse_mode="HTML",
         )
         await cq.answer("Секрет обновлён")
@@ -198,12 +302,7 @@ def register_sites_handlers(router: Router) -> None:
             await cq.answer("Не найден", show_alert=True)
             return
         await queries.update_router_enabled(db, rid, not bool(r["enabled"]))
-        text = await _format_site_detail(db, rid)
-        assert text is not None
-        r2 = await queries.get_monitored_router(db, rid)
-        assert r2 is not None
-        await edit_or_answer(cq, text, reply_markup=kb.site_detail(rid, bool(r2["enabled"])))
-        await cq.answer()
+        await on_site_view(cq, db)
 
     @router.callback_query(F.data.startswith("site:delask:"))
     async def on_site_delask(cq: CallbackQuery, db: Database) -> None:
@@ -214,7 +313,7 @@ def register_sites_handlers(router: Router) -> None:
             return
         await edit_or_answer(
             cq,
-            f"Удалить роутер «{r['display_name']}» и все цели?",
+            f"Удалить роутер «{r['display_name']}» и все устройства?",
             reply_markup=kb.confirm_site_delete(rid),
         )
         await cq.answer()
@@ -227,9 +326,8 @@ def register_sites_handlers(router: Router) -> None:
         await queries.delete_monitored_router(db, rid)
         if hb_server is not None:
             hb_server.invalidate_secrets_cache()
-        rows = await queries.list_monitored_routers(db)
-        site_rows = [(int(r["id"]), str(r["display_name"]), bool(r["enabled"])) for r in rows]
-        await edit_or_answer(cq, "Роутер удалён.", reply_markup=kb.sites_menu(site_rows))
+        menu_rows = await _build_router_menu_rows(db)
+        await edit_or_answer(cq, "Роутер удалён.", reply_markup=kb.routers_menu(menu_rows))
         await cq.answer()
 
     @router.callback_query(F.data.startswith("site:target_add:"))
@@ -237,7 +335,9 @@ def register_sites_handlers(router: Router) -> None:
         rid = int(cq.data.split(":")[2])
         await state.update_data(target_router_id=rid)
         await state.set_state(AddTargetStates.waiting_name)
-        await cq.message.answer("Имя цели (например «Камера вход»):")
+        await cq.message.answer(
+            "Имя устройства (например «Камера вход», «ПК офис»):"
+        )
         await cq.answer()
 
     @router.message(AddTargetStates.waiting_name, F.text)
@@ -266,13 +366,15 @@ def register_sites_handlers(router: Router) -> None:
         try:
             tid = await queries.insert_router_target(db, rid, name, addr)
         except Exception:
-            await message.answer("Не удалось добавить (возможно, такой адрес уже есть у этого роутера).")
+            await message.answer(
+                "Не удалось добавить (возможно, такой адрес уже есть у этого роутера)."
+            )
             return
         await state.clear()
         await message.answer(
-            f"Цель добавлена: {name} ({addr}), id={tid}.\n"
-            "Обновите сниппет на MikroTik: Сайты → роутер → «Показать сниппет».",
-            reply_markup=kb.main_menu(),
+            f"Устройство добавлено: {name} ({addr}), id={tid}.\n"
+            "Добавить ещё одно?",
+            reply_markup=kb.target_added_more(rid),
         )
 
     @router.callback_query(F.data.startswith("site:tview:"))
@@ -286,7 +388,7 @@ def register_sites_handlers(router: Router) -> None:
         settings = await queries.load_all_settings(db)
         hb_timeout = int(settings["heartbeat_timeout_sec"])
         text = (
-            f"Цель: {t['display_name']}\n"
+            f"Устройство: {t['display_name']}\n"
             f"id={tid}, router_id={rid}\n"
             f"Адрес: {t['address']}\n"
             f"Статус: {_target_status_line(t, hb_timeout)}\n"
@@ -316,7 +418,7 @@ def register_sites_handlers(router: Router) -> None:
             return
         await edit_or_answer(
             cq,
-            f"Удалить цель «{t['display_name']}» ({t['address']})?",
+            f"Удалить «{t['display_name']}» ({t['address']})?",
             reply_markup=kb.confirm_target_delete(tid, int(t["router_id"])),
         )
         await cq.answer()
@@ -330,9 +432,4 @@ def register_sites_handlers(router: Router) -> None:
             return
         rid = int(t["router_id"])
         await queries.delete_router_target(db, tid)
-        text = await _format_site_detail(db, rid)
-        assert text is not None
-        r = await queries.get_monitored_router(db, rid)
-        assert r is not None
-        await edit_or_answer(cq, text, reply_markup=kb.site_detail(rid, bool(r["enabled"])))
-        await cq.answer()
+        await on_site_view(cq, db)

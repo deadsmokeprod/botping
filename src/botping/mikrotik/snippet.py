@@ -51,7 +51,7 @@ def build_routeros_snippet(
             blocks.append(_ros7_ping_block(t, first=(i == 0)))
         ping_blocks = "\n".join(blocks)
     else:
-        ping_blocks = "# Нет целей — добавьте в Botping → Сайты → + Цель"
+        ping_blocks = "# Нет целей — Botping → Роутеры и устройства → + Устройство"
 
     script = f"""# Botping LAN monitor (RouterOS 7.x)
 # После смены целей обновите script на роутере.

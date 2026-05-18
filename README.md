@@ -105,8 +105,8 @@ asyncio.create_task(_botping_heartbeat())
 
 Мониторинг роутеров и устройств в локальной сети: MikroTik сам пингует IP и шлёт результат на тот же `/heartbeat`.
 
-1. В admin-боте: **Сайты** → **+ Добавить роутер** → добавьте **цели** (IP в LAN).
-2. **Показать сниппет MikroTik** — script + scheduler на 30 с (System → Scripts / Scheduler).
+1. В admin-боте: **Роутеры и устройства** → **+ Добавить роутер** → устройства (IP в LAN).
+2. **Установка на MikroTik** — script + scheduler на 30 с (System → Scripts / Scheduler).
 3. Шаблоны в репозитории: [deploy/mikrotik/](deploy/mikrotik/README.md).
 
 Формат тела запроса (заголовок `X-Heartbeat-Secret` как у ботов):

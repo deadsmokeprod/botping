@@ -15,7 +15,10 @@ def main_menu() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="Боты", callback_data="menu:bots"),
             ],
             [
-                InlineKeyboardButton(text="Сайты", callback_data="menu:sites"),
+                InlineKeyboardButton(
+                    text="Роутеры и устройства",
+                    callback_data="menu:routers",
+                ),
             ],
             [
                 InlineKeyboardButton(text="Отчёт Excel", callback_data="menu:report_excel"),
@@ -134,14 +137,14 @@ def confirm_delete(bot_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def sites_menu(router_rows: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup:
+def routers_menu(router_rows: list[tuple[int, str]]) -> InlineKeyboardMarkup:
+    """router_rows: (id, button label with status summary)."""
     rows: list[list[InlineKeyboardButton]] = []
-    for rid, name, en in router_rows:
-        flag = "on" if en else "off"
+    for rid, label in router_rows:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{name} [{flag}]",
+                    text=label[:64],
                     callback_data=f"site:view:{rid}",
                 )
             ]
@@ -151,21 +154,96 @@ def sites_menu(router_rows: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def site_detail(router_id: int, enabled: bool) -> InlineKeyboardMarkup:
-    toggle = "Выключить" if enabled else "Включить"
+def sites_menu(router_rows: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup:
+    """Backward-compatible wrapper."""
+    labels = [(rid, f"{name} [{'on' if en else 'off'}]") for rid, name, en in router_rows]
+    return routers_menu(labels)
+
+
+def router_after_create(router_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Показать сниппет MikroTik", callback_data=f"site:snippet:{router_id}")],
             [
-                InlineKeyboardButton(text="Показать секрет", callback_data=f"site:secret:{router_id}"),
-                InlineKeyboardButton(text="Сменить секрет", callback_data=f"site:rotate:{router_id}"),
+                InlineKeyboardButton(
+                    text="+ Устройство (шаг 2)",
+                    callback_data=f"site:target_add:{router_id}",
+                )
             ],
-            [InlineKeyboardButton(text="+ Цель (LAN IP)", callback_data=f"site:target_add:{router_id}")],
-            [InlineKeyboardButton(text=toggle, callback_data=f"site:toggle:{router_id}")],
-            [InlineKeyboardButton(text="Удалить роутер", callback_data=f"site:delask:{router_id}")],
-            [InlineKeyboardButton(text="К списку сайтов", callback_data="menu:sites")],
+            [
+                InlineKeyboardButton(
+                    text="К роутеру (шаг 3 позже)",
+                    callback_data=f"site:view:{router_id}",
+                )
+            ],
+            [InlineKeyboardButton(text="К списку", callback_data="menu:routers")],
         ]
     )
+
+
+def target_added_more(router_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Да, ещё одно",
+                    callback_data=f"site:target_add:{router_id}",
+                ),
+                InlineKeyboardButton(
+                    text="Нет, к роутеру",
+                    callback_data=f"site:view:{router_id}",
+                ),
+            ],
+        ]
+    )
+
+
+def router_detail(
+    router_id: int,
+    enabled: bool,
+    target_buttons: list[tuple[int, str]],
+) -> InlineKeyboardMarkup:
+    toggle = "Выключить мониторинг" if enabled else "Включить мониторинг"
+    rows: list[list[InlineKeyboardButton]] = []
+    for tid, label in target_buttons:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label[:64],
+                    callback_data=f"site:tview:{tid}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="+ Устройство в LAN",
+                callback_data=f"site:target_add:{router_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Установка на MikroTik",
+                callback_data=f"site:setup:{router_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text="Секрет", callback_data=f"site:secret:{router_id}"),
+            InlineKeyboardButton(text="Сменить секрет", callback_data=f"site:rotate:{router_id}"),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text=toggle, callback_data=f"site:toggle:{router_id}")])
+    rows.append([InlineKeyboardButton(text="Удалить роутер", callback_data=f"site:delask:{router_id}")])
+    rows.append([InlineKeyboardButton(text="К списку", callback_data="menu:routers")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def site_detail(router_id: int, enabled: bool) -> InlineKeyboardMarkup:
+    """Backward-compatible: no per-target buttons."""
+    return router_detail(router_id, enabled, [])
 
 
 def site_target_detail(target_id: int, router_id: int, enabled: bool) -> InlineKeyboardMarkup:
@@ -175,6 +253,7 @@ def site_target_detail(target_id: int, router_id: int, enabled: bool) -> InlineK
             [InlineKeyboardButton(text=toggle, callback_data=f"site:ttoggle:{target_id}")],
             [InlineKeyboardButton(text="Удалить цель", callback_data=f"site:tdelask:{target_id}")],
             [InlineKeyboardButton(text="К роутеру", callback_data=f"site:view:{router_id}")],
+            [InlineKeyboardButton(text="К списку", callback_data="menu:routers")],
         ]
     )
 

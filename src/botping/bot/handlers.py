@@ -200,9 +200,11 @@ async def _format_status(db: Database, hb_server: HeartbeatServer | None = None)
     ck_stats = await queries.get_checks_storage_stats(db)
     routers = await queries.list_monitored_routers(db)
     lines.append("---")
-    lines.append("Сайты (MikroTik):")
+    lines.append("Роутеры и устройства (MikroTik):")
     if not routers:
-        lines.append("Нет роутеров. Добавьте через «Сайты» → «+ Добавить роутер».")
+        lines.append(
+            "Нет роутеров. Добавьте через «Роутеры и устройства» → «+ Добавить роутер»."
+        )
     else:
         for r in routers:
             rid = int(r["id"])
@@ -273,7 +275,8 @@ def setup_router() -> Router:
             "Команды: /status, /failures, /settings, /report\n"
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
             "Добавить бота: «Боты» → «+ Добавить бота».\n"
-            "MikroTik + LAN: «Сайты» → «+ Добавить роутер» → цели → сниппет на роутер.",
+            "MikroTik + LAN: «Роутеры и устройства» → роутер → устройства (IP) → "
+            "«Установка на MikroTik».",
             reply_markup=kb.main_menu(),
         )
 
