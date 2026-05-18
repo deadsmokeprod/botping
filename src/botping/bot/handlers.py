@@ -508,7 +508,7 @@ def setup_router() -> Router:
         await cq.message.answer(
             "Сниппет для вашего бота (вставьте рядом с dp.start_polling).\n"
             "Если вместо `<IP_VPS>` у вас заглушка — задайте в .env переменную "
-            "`BOTPING_PUBLIC_HOST=198.51.100.42` (или свой IP/домен) и перезапустите Botping."
+            "`BOTPING_PUBLIC_HOST=<ваш_IP_или_домен>` в `.env` на VPS и перезапустите Botping."
         )
         await cq.message.answer(f"<pre>{snippet}</pre>", parse_mode="HTML")
         await cq.answer()

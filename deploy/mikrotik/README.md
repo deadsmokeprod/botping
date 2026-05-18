@@ -4,14 +4,14 @@ Botping мониторит MikroTik и устройства в LAN через **
 
 ## Установка (RouterOS 7)
 
-1. В admin-боте Botping: **Сайты** → добавьте роутер и цели → **Показать сниппет**.
+1. В admin-боте Botping: **Роутеры и устройства** → **+ Добавить роутер** → устройства (IP в LAN) → **Установка на MikroTik** — скопируйте сниппет.
 2. На роутере: **System → Scripts** → `+` → имя `botping-lan` → вставьте тело script из сниппета.
 3. **System → Scheduler** → `+`:
    - Name: `botping-lan`
    - Interval: `00:00:30`
    - On Event: `/system script run botping-lan`
    - Policy: `read,write,policy,test`
-4. Убедитесь, что с роутера доступен URL из `.env` (`BOTPING_PUBLIC_HOST` / `BOTPING_PUBLIC_URL`).
+4. Убедитесь, что с роутера доступен URL из `.env` на VPS (`BOTPING_PUBLIC_HOST` / `BOTPING_PUBLIC_URL`).
 
 ## Файлы
 
@@ -24,10 +24,10 @@ Botping мониторит MikroTik и устройства в LAN через **
 
 Актуальный скрипт с вашими IP генерирует admin-бот (тот же код, что `src/botping/mikrotik/snippet.py`).
 
-## Формат JSON
+## Формат JSON (ping устройств в LAN)
 
 ```json
-{"checks":[{"id":1,"address":"192.168.88.10","ok":true,"ms":12}]}
+{"checks":[{"id":1,"address":"192.0.2.10","ok":true,"ms":12}]}
 ```
 
 Секрет — заголовок `X-Heartbeat-Secret`.
@@ -56,4 +56,4 @@ Botping мониторит MikroTik и устройства в LAN через **
 {"events":[{"type":"custom","text":"Питание UPS на батарее"}]}
 ```
 
-Подробная инструкция на объекте: в репозитории MikroTik — `docs/уведомления-botping.md`.
+Подробнее — раздел «MikroTik» в [README.md](../../README.md) в корне репозитория.

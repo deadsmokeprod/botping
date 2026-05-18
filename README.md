@@ -1,64 +1,79 @@
 # Botping
 
-Сервис на Python для мониторинга ваших Telegram-ботов по модели **heartbeat**: каждый ваш бот раз в ~30 секунд сам шлёт короткий HTTP-запрос на VPS Botping. Если пинги перестали приходить — открывается инцидент и в отдельный админ-бот уходит алерт в указанные `chat_id`. Дополнительно раз в тик Botping проверяет доступность самого Telegram API (`getMe` к токену админ-бота). Все параметры и список ботов настраиваются прямо в Telegram: «Боты» / «Настройки».
+Сервис на Python: ваши Telegram-боты и устройства в сети сами «пингуют» Botping раз в ~30 секунд. Если пинги пропали — приходит алерт в отдельный **админ-бот**. Настройка списка ботов, роутеров и параметров — прямо в Telegram, без правки кода на сервере.
 
-## Почему heartbeat, а не getMe/getUpdates
+См. также [SECURITY.md](SECURITY.md) — что не выкладывать в git и что делать при утечке секрета.
 
-- `getMe` проверяет только валидность токена у Telegram — не видит, что ваш бот-процесс лежит.
-- `getUpdates`-зонд ненадёжен: Telegram при параллельном запросе отдаёт 409 **вашему боту**, а нам — 200 OK, причём каждую проверку сбрасывает long-poll. То есть зонд одновременно даёт ложные FAIL и мешает работе бота.
-- Heartbeat решает обе проблемы: «живость» подтверждает сам процесс бота, внешние сетевые всплески между VPS и Telegram не влияют на per-bot статус.
+---
 
-## Требования
+## Что умеет Botping
 
-- Python 3.11+
-- Токен админ-бота от [@BotFather](https://t.me/BotFather)
-- Ваш числовой `chat_id` (можно узнать у [@userinfobot](https://t.me/userinfobot))
-- Открытый входящий TCP-порт `8080` на VPS (значение по умолчанию, меняется в настройках).
+| Возможность | Кратко |
+|-------------|--------|
+| **Heartbeat ботов** | Каждый ваш бот шлёт HTTP на VPS; нет пинга → инцидент |
+| **Telegram API** | Раз в минуту `getMe` к admin-боту — отдельный алерт, если API недоступен |
+| **MikroTik + LAN** | Роутер пингует IP в локалке и шлёт результат на тот же endpoint |
+| **WAN ↔ LTE** | Мгновенное уведомление при переключении канала (не путать с «устройство в LAN недоступно») |
+| **Отчёты** | `/report` и опционально ежедневный Excel в 00:00 МСК |
 
-## Установка локально
+---
 
-```powershell
-cd d:\BOTS\Botping
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -e .
-copy .env.example .env
-# отредактируйте .env
-python -m botping.main
-```
+## Быстрый старт (≈15 минут)
 
-Файл БД по умолчанию: `./data/botping.db` (каталог создаётся автоматически).
+Нужны: VPS с Linux, аккаунт Telegram, базовые навыки копировать команды в терминал.
 
-## Docker (так и крутится на VPS)
+### Шаг 1. Админ-бот и ваш chat_id
+
+1. В [@BotFather](https://t.me/BotFather) создайте бота — это **админ-бот** Botping (не путать с ботами, которых вы будете мониторить).
+2. Скопируйте **токен** (вид `123456789:AAExampleFakeTokenForDocsOnly` — у вас будет свой).
+3. Узнайте свой числовой **chat_id** у [@userinfobot](https://t.me/userinfobot) (пример в документации: `100000001`).
+
+### Шаг 2. Установка на VPS (Docker)
 
 ```bash
+git clone https://github.com/YOUR_USER/botping.git /opt/botping
+cd /opt/botping
 cp .env.example .env
-# заполните ADMIN_BOT_TOKEN и ADMIN_CHAT_IDS
+```
+
+Откройте `.env` и заполните минимум:
+
+```dotenv
+ADMIN_BOT_TOKEN=ваш_токен_от_BotFather
+ADMIN_CHAT_IDS=ваш_chat_id
+BOTPING_PUBLIC_HOST=198.51.100.42
+```
+
+`BOTPING_PUBLIC_HOST` — **публичный IP или домен вашего VPS** (в примере выше — тестовый адрес из RFC 5737; подставьте свой). Без этого сниппеты для ботов покажут заглушку `<IP_VPS>`.
+
+Запуск:
+
+```bash
 docker compose up -d --build
 ```
 
-Порт `8080` проброшен в [docker-compose.yml](docker-compose.yml). База — в volume `botping_data`.
+Или автоматическая установка Docker + первый запуск: `bash deploy/setup-vps.sh`.
 
-## Подключение бота (самое важное)
+Откройте в фаерволе VPS порт **8080/tcp** (heartbeat). База данных — в Docker-volume `botping_data`.
 
-1. В Telegram откройте админ-бота → **Боты** → **+ Добавить бота** → имя → токен. После добавления админ-бот пришлёт готовый **сниппет** с уникальным секретом.
-2. В `.env` на VPS укажите публичный адрес Botping, чтобы сниппет подставлял правильный URL:
+### Шаг 3. Первый вход в админ-бот
 
-   ```dotenv
-   # один из:
-   BOTPING_PUBLIC_HOST=38.00.000.68   # IP VPS (HTTP)
-   # или:
-   BOTPING_PUBLIC_URL=https://botping.example.com   # если настроили HTTPS через Caddy/nginx
-   HEARTBEAT_PORT=8080
-   ```
-3. Вставьте сниппет в **код вашего бота** рядом с запуском `dp.start_polling(bot)` и перезапустите бота. Как только придёт первый пинг — в `/status` появится «ЖИВ».
+Напишите боту **`/start`**. Появится меню: Статус, Боты, Роутеры и устройства, Настройки и т.д.
 
-Пример сниппета (его же показывает админ-бот, уже с подставленным секретом):
+Доступ только у chat_id из `ADMIN_CHAT_IDS`. После смены `.env` перезапустите контейнер.
+
+### Шаг 4. Подключить мониторимый Telegram-бот
+
+1. **Боты** → **+ Добавить бота** → имя → токен бота из BotFather.
+2. Бот пришлёт **сниппет** Python — вставьте его в код **вашего** бота рядом с `start_polling` и перезапустите бота.
+3. **Статус** (`/status`) — напротив бота должно быть **ЖИВ** через ~30 с.
+
+Минимальный сниппет (секрет подставит админ-бот):
 
 ```python
 import asyncio, httpx
-BOTPING_URL = "http://<IP_VPS>:8080/heartbeat"
-HEARTBEAT_SECRET = "xxxxxxxxxxxxxxxxxxxxxxxx"
+BOTPING_URL = "http://198.51.100.42:8080/heartbeat"
+HEARTBEAT_SECRET = "demo-heartbeat-secret-32chars!!"
 
 async def _botping_heartbeat():
     headers = {"X-Heartbeat-Secret": HEARTBEAT_SECRET}
@@ -70,110 +85,176 @@ async def _botping_heartbeat():
                 pass
             await asyncio.sleep(30)
 
-# перед dp.start_polling(bot):
-asyncio.create_task(_botping_heartbeat())
+asyncio.create_task(_botping_heartbeat())  # перед start_polling
 ```
 
-Для существующих ботов секрет можно посмотреть или перевыпустить в карточке бота: «Боты» → выбрать бота → «Показать секрет» / «Сменить секрет».
+Секрет можно посмотреть или сменить: **Боты** → карточка бота → «Показать секрет» / «Сменить секрет».
 
-## Команды и меню в Telegram
+### Шаг 5 (опционально). MikroTik
 
-Доступ только для `ADMIN_CHAT_IDS`.
+**Роутеры и устройства** → роутер → IP устройств в LAN → **Установка на MikroTik**. Подробности: [deploy/mikrotik/README.md](deploy/mikrotik/README.md).
 
-Те же команды доступны в **меню слева от поля ввода** (кнопка «/» или иконка меню) — список обновляется при старте бота.
+---
 
-- `/start` — главное меню
-- `/status` — состояние каждого бота (ЖИВ/НЕДОСТУПЕН), Telegram API и диск
-- `/failures` — инциденты за последние 7 дней; `/failures 2026-04-01 2026-04-14` — за диапазон дат
-- `/report` — Excel-отчёт за период, человеко-читаемые статусы и длительности
-- `/settings` — параметры: интервал оценки, порог пропусков подряд, повтор алерта, **таймаут heartbeat**, **проверка Telegram API (0/1)**, ежедневный Excel (0/1), тихие часы JSON, диск
+## Настройка через Telegram
 
-Токены и секреты в ответах маскируются. Полные значения хранятся в SQLite — защитите файл БД.
+Команды дублируются в **меню «/»** слева от поля ввода.
 
-## Поведение мониторинга
+| Команда / кнопка | Назначение |
+|------------------|------------|
+| `/start` | Главное меню |
+| `/status` или **Статус** | Боты, роутеры, Telegram API, диск |
+| `/failures` или **Сбои** | Инциденты за 7 дней; `/failures 2026-04-01 2026-04-14` — за диапазон |
+| `/report` или **Отчёт Excel** | Excel за период |
+| `/settings` или **Настройки** | Интервалы, таймаут heartbeat, тихие часы, диск и др. |
+| **Боты** | Добавить / удалить / сниппет / секрет |
+| **Роутеры и устройства** | MikroTik, LAN-цели, WAN/LTE |
+| **Диск** | Занятость тома с БД |
 
-- **Основная проверка.** Бот считается живым, если последний heartbeat пришёл не позже `heartbeat_timeout_sec` секунд назад (по умолчанию 120 с). Подряд пропусков больше `fail_threshold` (по умолчанию 2) — открывается инцидент с алертом в Telegram.
-- **Telegram API-проверка.** Раз в тик делается `getMe` к токену admin-бота. Отдельный инцидент «Telegram API недоступен» открывается/закрывается независимо от per-bot инцидентов. Выключается параметром `telegram_api_probe_enabled=0`.
-- **Ежедневный Excel** (`daily_excel_report_enabled=1`): каждую полночь по Москве во все чаты из `ADMIN_CHAT_IDS` уходит тот же Excel, что и по `/report`, за **предыдущие сутки**. Если процесс долго не работал — при следующем запуске догонка по одному файлу на пропущенный день.
-- **Тихие часы**: новые и повторные алерты при down подавляются; сообщение о **восстановлении** всегда отправляется.
-- Настройки читаются из БД на каждом цикле — изменения из Telegram применяются без перезапуска.
+Токены и секреты в чате **маскируются**. Полные значения — в SQLite на VPS; защитите файл БД и `.env`.
 
-## Безопасность heartbeat
+---
 
-- По умолчанию — HTTP на порт 8080 + случайный секрет на каждого бота в заголовке `X-Heartbeat-Secret`. Этого достаточно, чтобы чужие не засоряли вашу базу.
-- Для продакшна рекомендуется поверх поднять Caddy/nginx с Let’s Encrypt: тогда трафик зашифрован, а `BOTPING_PUBLIC_URL` станет `https://…`.
+## MikroTik: устройства в LAN
 
-## MikroTik и LAN (push + ping)
+1. **Роутеры и устройства** → **+ Добавить роутер** → имя площадки.
+2. Добавьте **устройства** — IP в LAN (например `192.0.2.10` в вашей сети будет свой адрес).
+3. **Установка на MikroTik** — скопируйте script + создайте **Scheduler** каждые 30 с.
+4. С роутера должен открываться URL Botping (`http://ваш-vps:8080/heartbeat` или `https://botping.example.com/heartbeat`).
 
-Мониторинг роутеров и устройств в локальной сети: MikroTik сам пингует IP и шлёт результат на тот же `/heartbeat`.
-
-1. В admin-боте: **Роутеры и устройства** → **+ Добавить роутер** → устройства (IP в LAN).
-2. **Установка на MikroTik** — script + scheduler на 30 с (System → Scripts / Scheduler).
-3. Шаблоны в репозитории: [deploy/mikrotik/](deploy/mikrotik/README.md).
-
-Формат тела запроса (заголовок `X-Heartbeat-Secret` как у ботов):
+Формат тела (заголовок `X-Heartbeat-Secret` как у ботов):
 
 ```json
-{"checks":[{"id":1,"address":"192.168.88.10","ok":true,"ms":12}]}
+{"checks":[{"id":1,"address":"192.0.2.10","ok":true,"ms":12}]}
 ```
 
-Цель сопоставляется по `id` из Botping, иначе по `address`. Если роутер не пингует Botping — инцидент по роутеру; если ping до IP не проходит — по цели.
+- Нет пинга от роутера → инцидент «роутер недоступен».
+- Пинг до IP не проходит → инцидент по **цели**.
 
-Проверка с curl:
+Проверка с VPS или ПК:
 
 ```bash
-curl -s -X POST "http://<VPS>:8080/heartbeat" \
-  -H "X-Heartbeat-Secret: YOUR_ROUTER_SECRET" \
+curl -s -X POST "http://198.51.100.42:8080/heartbeat" \
+  -H "X-Heartbeat-Secret: demo-heartbeat-secret-32chars!!" \
   -H "Content-Type: application/json" \
-  -d '{"checks":[{"address":"192.168.88.10","ok":true,"ms":8}]}'
+  -d '{"checks":[{"address":"192.0.2.10","ok":true,"ms":8}]}'
 ```
+
+Шаблоны `.rsc`: [deploy/mikrotik/](deploy/mikrotik/).
+
+---
+
+## MikroTik: переключение WAN ↔ LTE
+
+Отдельные **мгновенные** сообщения в Telegram (не ждут таймаута heartbeat и не смешиваются с «камера в LAN недоступна»).
+
+1. **Роутеры и устройства** → роутер → **Переключение WAN/LTE** — два скрипта: `botping-internet-lte` и `botping-internet-wan`.
+2. В ваших скриптах failover (`Check_Internet`, `UPLink_WAN`) добавьте одну строку вызова (есть в сниппете бота).
+3. Проверка: на роутере **Run Script** → `botping-internet-lte` — сообщение в Telegram и запись в **Журнал переключений**.
+
+Типы событий в JSON:
+
+```json
+{"events":[{"type":"internet_lte"}]}
+```
+
+```json
+{"events":[{"type":"internet_wan"}]}
+```
+
+Тихие часы **не блокируют** эти уведомления.
+
+---
+
+## Как работает мониторинг (простыми словами)
+
+- **Бот жив**, если последний heartbeat не старше `heartbeat_timeout_sec` (по умолчанию 120 с). Несколько пропусков подряд (`fail_threshold`, по умолчанию 2) → алерт **НЕДОСТУПЕН**.
+- **Восстановление** — сообщение уходит всегда, даже ночью.
+- **Тихие часы** — новые и повторные алерты о down подавляются; WAN/LTE и восстановление — нет.
+- **Настройки** из Telegram пишутся в БД и подхватываются без перезапуска.
+- **Ежедневный Excel** (`daily_excel_report_enabled=1`) — в 00:00 МСК за предыдущие сутки.
+
+---
+
+## Переменные окружения (.env)
+
+| Переменная | Обязательно | Описание |
+|------------|-------------|----------|
+| `ADMIN_BOT_TOKEN` | да | Токен админ-бота |
+| `ADMIN_CHAT_IDS` | да | chat_id через запятую |
+| `DATABASE_PATH` | нет | Путь к SQLite (в Docker: `/app/data/botping.db`) |
+| `LOG_LEVEL` | нет | `INFO`, `DEBUG`, … |
+| `BOTPING_PUBLIC_HOST` | для сниппетов | IP/домен VPS → `http://host:8080` |
+| `BOTPING_PUBLIC_URL` | альтернатива | Полный URL с `https://` если есть TLS |
+| `HEARTBEAT_PORT` | нет | Порт heartbeat (по умолчанию 8080) |
+| `DEPLOY_SSH_*` | нет | Только локально для [scripts/](scripts/) — **не коммитить** |
+
+Полный шаблон: [.env.example](.env.example).
+
+---
 
 ## Бэкап
 
-Достаточно копировать файл SQLite (остановите сервис или используйте `.backup` в sqlite3 для консистентности).
+Скопируйте файл SQLite (`DATABASE_PATH`). Для консистентности лучше остановить контейнер или использовать `.backup` в sqlite3.
 
-## Как встроить heartbeat в свой бот (подробно)
+---
 
-Этот раздел — для тех, кто поднял Botping у себя и хочет, чтобы **его собственные Telegram-боты** слали сюда пинги. Выше, в разделе «Подключение бота», показан минимальный сниппет — здесь же разобраны готовые примеры под популярные фреймворки, куда именно класть код и как проверить, что всё работает.
+## Локальная разработка (без Docker)
 
-### Что должен делать ваш бот
-
-- Раз в ~30 секунд отправлять `POST` (или `GET`) на `http(s)://<BOTPING_HOST>:<HEARTBEAT_PORT>/heartbeat`.
-- Передавать свой секрет в заголовке `X-Heartbeat-Secret: <secret>` (альтернатива: query-параметр `?secret=<secret>`, но заголовок предпочтительнее — не попадает в логи прокси).
-- Игнорировать ошибки сети/таймауты — heartbeat не должен ронять основную работу бота.
-- Стартовать цикл heartbeat **после** инициализации event loop и **до** (или параллельно) старта polling/webhook.
-
-Сервер принимает любой body (и пустой), отвечает `200 OK` с JSON `{"ok": true, "bot_id": <id>}` при успехе. Статусы `404`/`429` — это бан/квота, см. «Безопасность heartbeat».
-
-### Где взять URL и секрет
-
-- **Секрет** выдаёт ваш админ-бот при добавлении бота (или по кнопке «Показать секрет» в карточке). Длина ≥ 16 символов, хранится в Telegram — в код можно и хардкодом, и через переменную окружения.
-- **URL** собирается из `BOTPING_PUBLIC_HOST` / `BOTPING_PUBLIC_URL` + `HEARTBEAT_PORT` (см. `.env.example`). Если стоите за Caddy/nginx с TLS — используйте `https://…/heartbeat` без порта.
-
-Рекомендую вынести в `.env` / переменные окружения, чтобы не коммитить секрет в репозиторий:
-
-```dotenv
-BOTPING_URL=http://38.00.000.68:8080/heartbeat
-BOTPING_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```bash
+git clone https://github.com/YOUR_USER/botping.git
+cd botping
+python -m venv .venv
+source .venv/bin/activate   # Windows: .\.venv\Scripts\activate
+pip install -e .
+cp .env.example .env
+# отредактируйте .env
+python -m botping.main
 ```
 
-### Вариант 1. aiogram 3.x (async)
+БД по умолчанию: `./data/botping.db`.
 
-Создайте рядом с основным файлом бота модуль `botping_client.py`:
+---
+
+## Скрипты деплоя (только ваша машина)
+
+В [scripts/](scripts/) — SSH-обновление VPS (`DEPLOY_SSH_HOST`, `DEPLOY_SSH_PASSWORD` и т.д.). Значения **только в локальном `.env`**, в git не попадают. См. [SECURITY.md](SECURITY.md).
+
+---
+
+<details>
+<summary><strong>Технически: почему heartbeat, а не getMe / getUpdates</strong></summary>
+
+- `getMe` проверяет только валидность токена у Telegram — не видит, что процесс бота упал.
+- `getUpdates`-зонд ненадёжен: при параллельном polling Telegram может отдать 409 **вашему боту**, а зонду — 200 OK, сбрасывая long-poll.
+- Heartbeat подтверждает живость **процесса** бота; сетевые всплески между VPS и Telegram не влияют на per-bot статус так же сильно.
+
+</details>
+
+<details>
+<summary><strong>Технически: встроить heartbeat (aiogram, PTB, sync, Node)</strong></summary>
+
+### Требования к клиенту
+
+- `POST` или `GET` на `http(s)://<host>:<port>/heartbeat` каждые ~30 с.
+- Заголовок `X-Heartbeat-Secret: <secret>` (или `?secret=`, хуже для логов прокси).
+- Ошибки сети не должны ронять бота.
+- Старт **до** или параллельно с polling (`asyncio.create_task` / daemon-thread).
+
+Ответ при успехе: `200` и `{"ok": true, "bot_id": N}`.
+
+### Модуль botping_client.py (aiogram 3)
 
 ```python
 import asyncio
 import logging
 import os
-
 import httpx
 
 log = logging.getLogger(__name__)
-
 BOTPING_URL = os.getenv("BOTPING_URL", "http://127.0.0.1:8080/heartbeat")
 BOTPING_SECRET = os.environ["BOTPING_SECRET"]
 BOTPING_INTERVAL_SEC = int(os.getenv("BOTPING_INTERVAL_SEC", "30"))
-
 
 async def heartbeat_loop() -> None:
     headers = {"X-Heartbeat-Secret": BOTPING_SECRET}
@@ -188,140 +269,63 @@ async def heartbeat_loop() -> None:
             await asyncio.sleep(BOTPING_INTERVAL_SEC)
 ```
 
-И подключите в точке входа, рядом со `start_polling`:
+Подключение:
 
 ```python
-from aiogram import Bot, Dispatcher
-from botping_client import heartbeat_loop
-
-async def main() -> None:
-    bot = Bot(token=TOKEN)
-    dp = Dispatcher()
-    # ... регистрация роутеров ...
-    asyncio.create_task(heartbeat_loop())
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.create_task(heartbeat_loop())
+await dp.start_polling(bot)
 ```
 
-### Вариант 2. aiogram 2.x (async)
+**aiogram 2.x:** `executor.start_polling(dp, on_startup=lambda _: asyncio.create_task(heartbeat_loop()))`.
 
-```python
-from aiogram import Bot, Dispatcher, executor
-from botping_client import heartbeat_loop
+**python-telegram-bot v20+:** `Application.builder().token(TOKEN).post_init(lambda app: app.create_task(heartbeat_loop())).build()`.
 
-bot = Bot(token=TOKEN)
-dp = Dispatcher(bot)
+**Синхронный бот:** `threading.Thread(target=..., daemon=True).start()` + `requests.post` в цикле с `time.sleep(30)`.
 
-async def on_startup(_):
-    import asyncio
-    asyncio.create_task(heartbeat_loop())
-
-if __name__ == "__main__":
-    executor.start_polling(dp, on_startup=on_startup)
-```
-
-### Вариант 3. python-telegram-bot v20+ (async)
-
-PTB сам управляет event loop, поэтому используйте `JobQueue` или фоновую таску через `post_init`:
-
-```python
-from telegram.ext import Application
-from botping_client import heartbeat_loop
-
-async def _post_init(app: Application) -> None:
-    import asyncio
-    app.create_task(heartbeat_loop())
-
-app = Application.builder().token(TOKEN).post_init(_post_init).build()
-app.run_polling()
-```
-
-### Вариант 4. Синхронный бот (pyTelegramBotAPI, старые версии PTB, свои решения)
-
-Если ваш бот синхронный — запускайте heartbeat в отдельном потоке, чтобы он не блокировал polling:
-
-```python
-import os
-import threading
-import time
-
-import requests
-
-BOTPING_URL = os.getenv("BOTPING_URL", "http://127.0.0.1:8080/heartbeat")
-BOTPING_SECRET = os.environ["BOTPING_SECRET"]
-
-
-def _heartbeat_loop() -> None:
-    headers = {"X-Heartbeat-Secret": BOTPING_SECRET}
-    while True:
-        try:
-            requests.post(BOTPING_URL, headers=headers, timeout=10)
-        except Exception:
-            pass
-        time.sleep(30)
-
-
-def start_heartbeat() -> None:
-    t = threading.Thread(target=_heartbeat_loop, name="botping-heartbeat", daemon=True)
-    t.start()
-
-
-if __name__ == "__main__":
-    start_heartbeat()
-    bot.infinity_polling()  # ваш polling
-```
-
-### Вариант 5. Node.js / aiogram-подобные боты на других языках
-
-Сервер принимает обычный HTTP — подойдёт любой клиент:
+**Node.js:**
 
 ```javascript
-const BOTPING_URL = process.env.BOTPING_URL;
-const BOTPING_SECRET = process.env.BOTPING_SECRET;
-
 setInterval(async () => {
   try {
-    await fetch(BOTPING_URL, {
+    await fetch(process.env.BOTPING_URL, {
       method: "POST",
-      headers: { "X-Heartbeat-Secret": BOTPING_SECRET },
+      headers: { "X-Heartbeat-Secret": process.env.BOTPING_SECRET },
     });
-  } catch (_) { /* ignore */ }
+  } catch (_) {}
 }, 30_000);
 ```
 
-Curl для отладки:
-
-```bash
-curl -i -X POST "$BOTPING_URL" -H "X-Heartbeat-Secret: $BOTPING_SECRET"
-# Ожидаем HTTP/1.1 200 OK и тело {"ok":true,"bot_id":N}
-```
-
-### Куда именно вставлять
-
-1. Создайте объект бота и диспетчер **как обычно**.
-2. Зарегистрируйте роутеры/хендлеры.
-3. **Перед** запуском polling/webhook стартуйте heartbeat (`asyncio.create_task(...)` в async-мире или `threading.Thread(..., daemon=True)` в sync).
-4. Запускайте polling. Порядок важен: если стартовать heartbeat после блокирующего polling, он никогда не запустится.
-
-### Проверка, что всё работает
-
-1. Запустите ваш бот.
-2. В админ-боте откройте `/status` — напротив вашего бота должно появиться «ЖИВ», last_seen обновляется каждые ~30 сек.
-3. Остановите бот — спустя `heartbeat_timeout_sec` (по умолчанию 120 с) и `fail_threshold` пропусков подряд (по умолчанию 2) придёт алерт «НЕДОСТУПЕН».
-4. Запустите снова — при следующем heartbeat инцидент автоматически закроется сообщением «восстановлен».
-
 ### Частые ошибки
 
-- **Бот ЖИВ, пока локально запущен, но на VPS — «НЕДОСТУПЕН».** Проверьте, что в боте URL указывает на **публичный** адрес Botping, а не на `127.0.0.1`. На VPS — что порт `HEARTBEAT_PORT` открыт в фаерволе (`ufw allow 8080/tcp`) и проброшен в `docker-compose.yml`.
-- **Всё время 404.** Неверный секрет, секрет короче 16 символов либо IP уже в бане за флуд. Подождите `heartbeat_ban_duration_min` минут, сверьте секрет с «Показать секрет» в админ-боте.
-- **В Docker-контейнере heartbeat не достаёт до Botping.** Если Botping и клиентский бот на одной машине — используйте внутренний IP/имя сервиса, а не `127.0.0.1` изнутри контейнера.
-- **Heartbeat блокирует бот.** Значит вы вызвали его синхронно в одном потоке с polling. В async — используйте `asyncio.create_task`, в sync — `threading.Thread(..., daemon=True)`.
-- **Секрет утёк в git.** Откройте карточку бота → «Сменить секрет», обновите переменную окружения у бота, перезапустите его. Старый секрет сразу перестаёт работать.
+| Симптом | Решение |
+|---------|---------|
+| ЖИВ локально, НЕДОСТУПЕН на VPS | URL должен указывать на **публичный** адрес Botping, не `127.0.0.1`; открыт порт 8080 |
+| Постоянно 404 | Неверный секрет, секрет &lt; 16 символов, IP в бане — «Сменить секрет», подождать `heartbeat_ban_duration_min` |
+| Heartbeat «висит» polling | Используйте фоновую задачу/поток, не блокируйте главный поток |
+| Секрет в git | Сменить секрет в боте, обновить env, перезапустить |
 
-### Настройка частоты и таймаутов
+`heartbeat_timeout_sec` держите ~в 3–4 раза больше интервала пинга (при 30 с пинге — 90–120 с таймаут).
 
-- Интервал на стороне бота — 30 секунд, значение по умолчанию. Можно уменьшить до 10–15 с; учтите лимит `heartbeat_unauth_rate_per_min` (300 rpm на IP для авторизованных пингов).
-- Серверный таймаут меняется в Telegram: `/settings` → `heartbeat_timeout_sec`. Держите его в ~3–4 раза больше интервала пинга, иначе редкие сетевые провалы будут давать ложные алерты.
-- Порог пропусков подряд до открытия инцидента — `fail_threshold` там же.
+</details>
+
+<details>
+<summary><strong>Технически: безопасность heartbeat</strong></summary>
+
+- По умолчанию HTTP на 8080 + уникальный секрет ≥ 16 символов в `X-Heartbeat-Secret`.
+- Лимиты и автобан IP за неверные запросы — в `/settings` (см. подсказки в боте).
+- Для продакшна: Caddy/nginx + Let's Encrypt, `BOTPING_PUBLIC_URL=https://botping.example.com`, порт 443.
+
+</details>
+
+<details>
+<summary><strong>Технически: HTTPS за reverse proxy (кратко)</strong></summary>
+
+Пример: Caddy с `reverse_proxy localhost:8080`, в `.env` на Botping:
+
+```dotenv
+BOTPING_PUBLIC_URL=https://botping.example.com
+```
+
+В сниппетах ботов URL станет `https://botping.example.com/heartbeat` без `:8080`.
+
+</details>
