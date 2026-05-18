@@ -19,7 +19,8 @@ from botping.bot.ui import edit_or_answer
 from botping.db import queries
 from botping.db.pool import Database, generate_heartbeat_secret
 from botping.heartbeat_server import HeartbeatServer
-from botping.mikrotik.snippet import build_routeros_snippet
+from botping.mikrotik.snippet import build_routeros_snippet, build_routeros_uplink_events_snippet
+from botping.router_events import internet_channel_label
 from botping.monitor.router_monitor import _target_alive
 
 ROUTERS_MENU_INTRO = (
@@ -28,7 +29,8 @@ ROUTERS_MENU_INTRO = (
     "1) Добавьте роутер (имя площадки).\n"
     "2) Укажите устройства в LAN — IP, которые MikroTik будет пинговать.\n"
     "3) Установите скрипт на роутер (кнопка «Установка на MikroTik»).\n"
-    "4) Проверьте /status — роутер и устройства должны быть ЖИВ.\n"
+    "4) Настройте уведомления WAN/LTE (кнопка в карточке роутера).\n"
+    "5) Проверьте /status — роутер и устройства должны быть ЖИВ.\n"
 )
 
 SETUP_CHECKLIST = (
@@ -37,6 +39,18 @@ SETUP_CHECKLIST = (
     "• System → Scheduler → каждые 30 с, policy: read,write,policy,test\n"
     "• Убедиться, что с роутера есть интернет до VPS\n"
     "• В боте: /status — блок «Роутеры и устройства»"
+)
+
+UPLINK_SETUP_INTRO = (
+    "Уведомления о переключении интернета WAN ↔ LTE\n\n"
+    "Это отдельные сообщения в Telegram (не путать с «устройство в LAN недоступно»).\n\n"
+    "Чеклист:\n"
+    "1) System → Scripts — создать botping-internet-lte и botping-internet-wan\n"
+    "   (скопируйте оба блока ниже).\n"
+    "2) В скриптах Check_Internet и UPLink_WAN — одна строка вызова\n"
+    "   (см. конец сообщения).\n"
+    "3) Проверка: Run Script → botping-internet-lte — в Telegram должно прийти сообщение.\n"
+    "4) Журнал — кнопка «Журнал переключений» в карточке роутера."
 )
 
 
@@ -111,11 +125,21 @@ async def _format_site_detail(db: Database, router_id: int) -> str | None:
         hb_state = f"ЖИВ, пинг {format_age_ru(age)} назад"
     else:
         hb_state = f"НЕДОСТУПЕН, нет пинга {format_age_ru(age)}"
+    last_ev = await queries.get_latest_router_event(db, router_id)
+    if last_ev:
+        ch = internet_channel_label(str(last_ev["event_type"]))
+        channel_line = f"Канал интернета: {ch}" if ch else "Канал интернета: (см. журнал)"
+        last_sw = f"Последнее переключение: {last_ev['created_at']}"
+    else:
+        channel_line = "Канал интернета: ещё не было переключений"
+        last_sw = "Последнее переключение: —"
     lines = [
         f"Роутер: {r['display_name']}",
         f"id={router_id}",
         f"Мониторинг: {'включён' if r['enabled'] else 'выключен (пинги всё равно принимаются)'}",
         f"Heartbeat: {hb_state}",
+        channel_line,
+        last_sw,
         f"Последний пинг: {r.get('last_heartbeat_at') or '—'}",
         f"С IP: {r.get('last_heartbeat_ip') or '—'}",
         f"Секрет: {mask_secret(str(r['heartbeat_secret']))}",
@@ -141,6 +165,46 @@ async def _format_site_detail(db: Database, router_id: int) -> str | None:
         lines.append("После смены списка IP обновите скрипт: «Установка на MikroTik».")
     else:
         lines.append("Шаг 2: добавьте устройство (IP в LAN), затем «Установка на MikroTik».")
+    return "\n".join(lines)
+
+
+async def _send_uplink_setup(
+    message_or_cq: Message | CallbackQuery,
+    db: Database,
+    router_id: int,
+) -> None:
+    r = await queries.get_monitored_router(db, router_id)
+    if not r:
+        return
+    snippet = build_routeros_uplink_events_snippet(
+        public_host_from_env(), str(r["heartbeat_secret"])
+    )
+    header = f"{UPLINK_SETUP_INTRO}\n\nРоутер: {r['display_name']}\n\n"
+    if isinstance(message_or_cq, CallbackQuery):
+        msg = message_or_cq.message
+        assert msg is not None
+        await msg.answer(header)
+        for part in chunk_text(snippet):
+            await msg.answer(f"<pre>{part}</pre>", parse_mode="HTML")
+    else:
+        await message_or_cq.answer(header)
+        for part in chunk_text(snippet):
+            await message_or_cq.answer(f"<pre>{part}</pre>", parse_mode="HTML")
+
+
+async def _format_event_log(db: Database, router_id: int) -> str | None:
+    r = await queries.get_monitored_router(db, router_id)
+    if not r:
+        return None
+    events = await queries.list_router_events(db, router_id, limit=20)
+    lines = [f"Журнал переключений — {r['display_name']}", ""]
+    if not events:
+        lines.append("Записей пока нет.")
+        lines.append("Настройте скрипты: «Переключение WAN/LTE» в карточке роутера.")
+    else:
+        for ev in events:
+            lines.append(f"• {ev['created_at']}")
+            lines.append(f"  {ev['message']}")
     return "\n".join(lines)
 
 
@@ -257,6 +321,26 @@ def register_sites_handlers(router: Router) -> None:
         await _send_router_setup(cq, db, rid)
         await cq.answer()
 
+    @router.callback_query(F.data.startswith("site:uplink:"))
+    async def on_site_uplink(cq: CallbackQuery, db: Database) -> None:
+        rid = int(cq.data.split(":")[2])
+        r = await queries.get_monitored_router(db, rid)
+        if not r:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        await _send_uplink_setup(cq, db, rid)
+        await cq.answer()
+
+    @router.callback_query(F.data.startswith("site:evlog:"))
+    async def on_site_evlog(cq: CallbackQuery, db: Database) -> None:
+        rid = int(cq.data.split(":")[2])
+        text = await _format_event_log(db, rid)
+        if not text:
+            await cq.answer("Не найден", show_alert=True)
+            return
+        await cq.message.answer(text)
+        await cq.answer()
+
     @router.callback_query(F.data.startswith("site:secret:"))
     async def on_site_secret(cq: CallbackQuery, db: Database) -> None:
         rid = int(cq.data.split(":")[2])
@@ -289,7 +373,7 @@ def register_sites_handlers(router: Router) -> None:
             hb_server.invalidate_secrets_cache()
         await cq.message.answer(
             f"Новый секрет для {r['display_name']}:\n<code>{new_secret}</code>\n"
-            "Обновите script на MikroTik («Установка на MikroTik»).",
+            "Обновите скрипты на MikroTik («Установка на MikroTik» и «Переключение WAN/LTE»).",
             parse_mode="HTML",
         )
         await cq.answer("Секрет обновлён")

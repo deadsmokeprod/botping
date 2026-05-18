@@ -102,3 +102,68 @@ def _build_ros6_snippet(
     if targets:
         lines.append("# Цели в LAN: обновитесь до ROS7 или см. deploy/mikrotik/botping-lan.rsc")
     return "\n".join(lines)
+
+
+def _ros7_event_fetch_script(
+    script_name: str,
+    event_type: str,
+    esc_url: str,
+    esc_secret: str,
+    *,
+    comment_ru: str,
+) -> str:
+    esc_type = _escape_routeros_string(event_type)
+    return f"""# {comment_ru}
+# Имя скрипта на роутере: {script_name}
+
+:local botpingUrl "{esc_url}"
+:local botpingSecret "{esc_secret}"
+:local json "{{\\\"events\\\":[{{\\\"type\\\":\\\"{esc_type}\\\"}}]}}"
+:do {{
+  /tool fetch url=$botpingUrl http-method=post \\
+    http-header-field=("X-Heartbeat-Secret: " . $botpingSecret) \\
+    http-header-field="Content-Type: application/json" \\
+    http-data=$json check-certificate=no keep-result=no
+}} on-error={{}}
+"""
+
+
+def build_routeros_uplink_events_snippet(url: str, secret: str) -> str:
+    """Скрипты уведомления о переключении WAN ↔ LTE (отдельно от botping-lan)."""
+    base_url = url.rstrip("/")
+    hb_url = base_url if base_url.endswith("/heartbeat") else f"{base_url}/heartbeat"
+    esc_url = _escape_routeros_string(hb_url)
+    esc_secret = _escape_routeros_string(secret)
+
+    lte = _ros7_event_fetch_script(
+        "botping-internet-lte",
+        "internet_lte",
+        esc_url,
+        esc_secret,
+        comment_ru="Сообщение в Telegram: переключились на резерв (LTE)",
+    )
+    wan = _ros7_event_fetch_script(
+        "botping-internet-wan",
+        "internet_wan",
+        esc_url,
+        esc_secret,
+        comment_ru="Сообщение в Telegram: снова основной интернет (WAN)",
+    )
+
+    failover_hint = (
+        "=== Куда вставить вызов (скрипты Check_Internet / UPLink_WAN) ===\n\n"
+        "После строки «переключились на LTE» (IsBackupActive = true):\n"
+        "  :do { /system script run botping-internet-lte } on-error={}\n\n"
+        "После строки «WAN восстановлен» (IsBackupActive = false):\n"
+        "  :do { /system script run botping-internet-wan } on-error={}\n\n"
+        "Подробнее: в проекте MikroTik — docs/уведомления-botping.md"
+    )
+
+    return (
+        "=== Шаг 1: script botping-internet-lte ===\n\n"
+        + lte
+        + "\n\n=== Шаг 2: script botping-internet-wan ===\n\n"
+        + wan
+        + "\n\n"
+        + failover_hint
+    )

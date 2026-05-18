@@ -133,6 +133,15 @@ class Database:
                 last_alert_at TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_router_target_incidents_open ON router_target_incidents(target_id) WHERE ended_at IS NULL;
+            CREATE TABLE IF NOT EXISTS router_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                router_id INTEGER NOT NULL REFERENCES monitored_routers(id) ON DELETE CASCADE,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                source_ip TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_router_events_router_ts ON router_events(router_id, created_at);
             """
         )
         await self._conn.commit()

@@ -31,3 +31,29 @@ Botping мониторит MikroTik и устройства в LAN через **
 ```
 
 Секрет — заголовок `X-Heartbeat-Secret`.
+
+## Переключение WAN ↔ LTE (отдельные уведомления)
+
+Не путать с мониторингом устройств в LAN: это **мгновенное** сообщение в Telegram, когда роутер ушёл на LTE или вернулся на WAN.
+
+1. В admin-боте: **Роутеры и устройства** → роутер → **Переключение WAN/LTE** — скопируйте два скрипта `botping-internet-lte` и `botping-internet-wan`.
+2. В скриптах failover (`Check_Internet`, `UPLink_WAN`) добавьте вызов (см. конец сниппета в боте).
+3. Проверка: **Run Script** → `botping-internet-lte` — в Telegram и в **Журнал переключений**.
+
+Формат JSON для событий:
+
+```json
+{"events":[{"type":"internet_lte"}]}
+```
+
+```json
+{"events":[{"type":"internet_wan"}]}
+```
+
+Свой текст (редко нужен):
+
+```json
+{"events":[{"type":"custom","text":"Питание UPS на батарее"}]}
+```
+
+Подробная инструкция на объекте: в репозитории MikroTik — `docs/уведомления-botping.md`.

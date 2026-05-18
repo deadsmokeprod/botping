@@ -231,6 +231,18 @@ def router_detail(
     )
     rows.append(
         [
+            InlineKeyboardButton(
+                text="Переключение WAN/LTE",
+                callback_data=f"site:uplink:{router_id}",
+            ),
+            InlineKeyboardButton(
+                text="Журнал переключений",
+                callback_data=f"site:evlog:{router_id}",
+            ),
+        ]
+    )
+    rows.append(
+        [
             InlineKeyboardButton(text="Секрет", callback_data=f"site:secret:{router_id}"),
             InlineKeyboardButton(text="Сменить секрет", callback_data=f"site:rotate:{router_id}"),
         ]

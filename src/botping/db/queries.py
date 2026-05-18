@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
-from botping.timeutil import now_moscow_iso
+from botping.router_events import ROUTER_EVENT_DEDUP_SEC, format_router_event_message
+from botping.timeutil import MOSCOW_TZ, now_moscow_iso
 
 if TYPE_CHECKING:
     from botping.db.pool import Database
@@ -1197,6 +1198,115 @@ async def export_router_target_incidents_overlapping(
         for r in rows
     ]
     return out, truncated
+
+
+# ── Router events (WAN/LTE, custom) ─────────────────────────────────
+
+
+def _router_event_dedup_cutoff_iso() -> str:
+    from datetime import datetime, timedelta
+
+    cutoff = datetime.now(MOSCOW_TZ) - timedelta(seconds=ROUTER_EVENT_DEDUP_SEC)
+    return cutoff.strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def router_event_recent_duplicate(
+    db: Database, router_id: int, event_type: str
+) -> bool:
+    cutoff = _router_event_dedup_cutoff_iso()
+    row = await db.fetchone(
+        """
+        SELECT id FROM router_events
+        WHERE router_id = ? AND event_type = ? AND created_at >= ?
+        LIMIT 1
+        """,
+        (router_id, event_type, cutoff),
+    )
+    return row is not None
+
+
+async def insert_router_event(
+    db: Database,
+    router_id: int,
+    event_type: str,
+    message: str,
+    source_ip: str | None,
+) -> int:
+    row = await db.write_returning_one(
+        """
+        INSERT INTO router_events (router_id, event_type, message, created_at, source_ip)
+        VALUES (?, ?, ?, ?, ?) RETURNING id
+        """,
+        (router_id, event_type, message[:1000], now_moscow_iso(), source_ip),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def record_router_event(
+    db: Database,
+    router_id: int,
+    router_name: str,
+    event_type: str,
+    source_ip: str | None,
+    *,
+    custom_text: str | None = None,
+) -> tuple[int, bool, str]:
+    """
+    Сохраняет событие. Возвращает (id, notify_telegram, message).
+    notify_telegram=False при дедупе за ROUTER_EVENT_DEDUP_SEC.
+    """
+    message = format_router_event_message(
+        router_name, event_type, custom_text=custom_text
+    )
+    if await router_event_recent_duplicate(db, router_id, event_type):
+        return None, False, message
+    eid = await insert_router_event(db, router_id, event_type, message, source_ip)
+    return eid, True, message
+
+
+async def get_latest_router_event(db: Database, router_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, router_id, event_type, message, created_at, source_ip
+        FROM router_events WHERE router_id = ?
+        ORDER BY id DESC LIMIT 1
+        """,
+        (router_id,),
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "router_id": r[1],
+        "event_type": r[2],
+        "message": r[3],
+        "created_at": r[4],
+        "source_ip": r[5],
+    }
+
+
+async def list_router_events(
+    db: Database, router_id: int, *, limit: int = 20
+) -> list[dict[str, Any]]:
+    lim = max(1, min(50, limit))
+    rows = await db.fetchall(
+        """
+        SELECT id, event_type, message, created_at
+        FROM router_events WHERE router_id = ?
+        ORDER BY id DESC LIMIT ?
+        """,
+        (router_id, lim),
+    )
+    return [
+        {
+            "id": r[0],
+            "event_type": r[1],
+            "message": r[2],
+            "created_at": r[3],
+        }
+        for r in rows
+    ]
 
 
 # ── Disk guard: cleanup queries ──────────────────────────────────────

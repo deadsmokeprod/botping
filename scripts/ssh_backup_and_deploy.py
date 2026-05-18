@@ -50,9 +50,9 @@ def run(cmd: str, timeout: int = 300) -> tuple[int, str, str]:
     err = stderr.read().decode("utf-8", errors="replace")
     code = int(stdout.channel.recv_exit_status())
     if out.strip():
-        print(out.rstrip())
+        print(out.rstrip().encode("utf-8", errors="replace").decode("utf-8"))
     if err.strip():
-        print("[stderr]", err.rstrip())
+        print("[stderr]", err.rstrip().encode("utf-8", errors="replace").decode("utf-8"))
     return code, out, err
 
 

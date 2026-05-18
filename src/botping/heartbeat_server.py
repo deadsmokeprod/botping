@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from aiohttp import web
@@ -48,10 +49,16 @@ def _extract_secret(request: web.Request) -> str:
     return (request.query.get("secret") or "").strip()
 
 
+NotifyFn = Callable[[str], Awaitable[None]]
+
+
 class HeartbeatServer:
-    def __init__(self, db: Database, port: int) -> None:
+    def __init__(
+        self, db: Database, port: int, notify: NotifyFn | None = None
+    ) -> None:
         self._db = db
         self._port = port
+        self._notify = notify
         self._runner: web.AppRunner | None = None
         self._gc_task: asyncio.Task[None] | None = None
 
@@ -255,6 +262,34 @@ class HeartbeatServer:
                 )
                 matched_targets += 1
 
+        events_notified = 0
+        events_skipped = 0
+        if payload is not None and payload.events:
+            router = await queries.get_monitored_router(self._db, matched_id)
+            rname = str(router["display_name"]) if router else f"id={matched_id}"
+            for ev in payload.events:
+                _eid, do_notify, msg = await queries.record_router_event(
+                    self._db,
+                    matched_id,
+                    rname,
+                    ev.event_type,
+                    ip if ip != "-" else None,
+                    custom_text=ev.custom_text,
+                )
+                if do_notify:
+                    events_notified += 1
+                    if self._notify is not None:
+                        try:
+                            await self._notify(msg)
+                        except Exception:
+                            logger.exception(
+                                "router event notify failed router_id=%s type=%s",
+                                matched_id,
+                                ev.event_type,
+                            )
+                else:
+                    events_skipped += 1
+
         self._recent_success[ip] = now
         self._fails.pop(ip, None)
         return web.json_response(
@@ -263,6 +298,8 @@ class HeartbeatServer:
                 "router_id": matched_id,
                 "matched": matched_targets,
                 "ignored": ignored,
+                "events_notified": events_notified,
+                "events_skipped": events_skipped,
             }
         )
 
@@ -361,9 +398,9 @@ class HeartbeatServer:
 
 
 def start_heartbeat_server(
-    db: Database, port: int
+    db: Database, port: int, *, notify: NotifyFn | None = None
 ) -> tuple[HeartbeatServer, asyncio.Task[Any]]:
-    server = HeartbeatServer(db, port)
+    server = HeartbeatServer(db, port, notify=notify)
 
     async def _run() -> None:
         try:

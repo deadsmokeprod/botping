@@ -19,6 +19,7 @@ from botping.bot.settings_help import META, format_key_change_prompt
 from botping.bot.handlers_sites import register_sites_handlers
 from botping.bot.states import AddBotStates, QuietHoursStates, ReportStates, SettingStates
 from botping.monitor.router_monitor import _target_alive
+from botping.router_events import internet_channel_label
 from botping.bot.ui import edit_or_answer
 from botping.db import queries
 from botping.db.pool import Database, generate_heartbeat_secret
@@ -218,7 +219,14 @@ async def _format_status(db: Database, hb_server: HeartbeatServer | None = None)
                 r_state = f"ЖИВ, пинг {_format_age_ru(age)} назад"
             else:
                 r_state = f"НЕДОСТУПЕН, нет пинга {_format_age_ru(age)}"
-            lines.append(f"- {r['display_name']} (id={rid}, {st}): {r_state}{inc_s}")
+            last_ev = await queries.get_latest_router_event(db, rid)
+            ch = (
+                internet_channel_label(str(last_ev["event_type"]))
+                if last_ev
+                else None
+            )
+            ch_s = f", канал: {ch}" if ch else ""
+            lines.append(f"- {r['display_name']} (id={rid}, {st}): {r_state}{ch_s}{inc_s}")
             if not r["enabled"]:
                 continue
             targets = await queries.list_router_targets(db, rid, enabled_only=True)
@@ -276,7 +284,7 @@ def setup_router() -> Router:
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
             "Добавить бота: «Боты» → «+ Добавить бота».\n"
             "MikroTik + LAN: «Роутеры и устройства» → роутер → устройства (IP) → "
-            "«Установка на MikroTik».",
+            "«Установка на MikroTik»; WAN/LTE — «Переключение WAN/LTE».",
             reply_markup=kb.main_menu(),
         )
 

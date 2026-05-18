@@ -48,7 +48,7 @@ async def _amain() -> None:
     disk_task = start_disk_guard(db, notify, stop)
 
     hb_port = (await queries.load_all_settings(db))["heartbeat_port"]
-    hb_server, hb_task = start_heartbeat_server(db, port=int(hb_port))
+    hb_server, hb_task = start_heartbeat_server(db, port=int(hb_port), notify=notify)
 
     # Только message/callback_query: на dp.update приходят my_chat_member и др. без from_user
     dp.message.outer_middleware(AdminChatMiddleware(settings))
