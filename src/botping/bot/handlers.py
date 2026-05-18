@@ -13,7 +13,7 @@ from aiogram.fsm.state import default_state
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from botping.bot import keyboards as kb
-from botping.bot.commands import refresh_chat_menu_button
+from botping.bot.commands import refresh_chat_commands_and_menu
 from botping.bot.reports.build import build_availability_report_bundle
 from botping.bot.reports.period_parse import parse_period_line
 from botping.bot.settings_help import META, format_key_change_prompt
@@ -279,20 +279,29 @@ def setup_router() -> Router:
         await state.clear()
         if message.chat.type == "private":
             try:
-                await refresh_chat_menu_button(message.bot, message.chat.id)
+                await refresh_chat_commands_and_menu(message.bot, message.chat.id)
             except Exception:
-                logger.exception("Не удалось обновить кнопку меню для chat_id=%s", message.chat.id)
+                logger.exception(
+                    "Не удалось обновить команды/меню для chat_id=%s", message.chat.id
+                )
         await message.answer(
             "Botping: мониторинг ваших ботов через heartbeat.\n"
             "Каждый ваш бот сам раз в 30 секунд пингует Botping. Нет пинга — инцидент.\n"
             "Отдельно проверяется доступность Telegram API (getMe к admin-боту).\n"
             "Команды: /status, /failures, /settings, /report\n"
+            "Список команд: кнопка ☰ слева от поля ввода (если не видно — "
+            "закройте и снова откройте чат).\n"
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
             "Добавить бота: «Боты» → «+ Добавить бота».\n"
             "MikroTik + LAN: «Роутеры и устройства» → роутер → устройства (IP) → "
             "«Установка на MikroTik»; WAN/LTE — «Переключение WAN/LTE».",
             reply_markup=kb.main_menu(),
         )
+        if message.chat.type == "private":
+            await message.answer(
+                "Быстрые команды на клавиатуре:",
+                reply_markup=kb.commands_reply_keyboard(),
+            )
 
     @router.message(Command("status"))
     async def cmd_status(

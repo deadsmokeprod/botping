@@ -1,6 +1,31 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
+
+
+def commands_reply_keyboard() -> ReplyKeyboardMarkup:
+    """Кнопки-команды внизу экрана (всегда видны после /start)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="/start"),
+                KeyboardButton(text="/status"),
+            ],
+            [
+                KeyboardButton(text="/failures"),
+                KeyboardButton(text="/settings"),
+            ],
+            [KeyboardButton(text="/report")],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Команда или текст…",
+    )
 
 
 def main_menu() -> InlineKeyboardMarkup:
