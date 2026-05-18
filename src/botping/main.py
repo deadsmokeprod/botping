@@ -6,6 +6,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from botping.bot.commands import BOT_COMMANDS, register_bot_commands
 from botping.bot.handlers import setup_router
 from botping.bot.middlewares import AdminChatMiddleware, DbMiddleware
 from botping.config import load_settings
@@ -33,6 +34,8 @@ async def _amain() -> None:
     logger.info("Загружено admin_chat_ids: %s шт.", len(settings.admin_chat_ids))
 
     bot = Bot(settings.admin_bot_token)
+    await register_bot_commands(bot)
+    logger.info("Команды Telegram зарегистрированы (%d шт.)", len(BOT_COMMANDS))
     dp = Dispatcher(storage=MemoryStorage())
 
     async def notify(text: str) -> None:

@@ -634,7 +634,7 @@ def setup_router() -> Router:
     async def fallback_plain(message: Message) -> None:
         await message.answer(
             "Напишите /start — откроется меню.\n"
-            "Команды: /status, /failures, /settings"
+            "Команды: /status, /failures, /settings, /report"
         )
 
     register_sites_handlers(router)
