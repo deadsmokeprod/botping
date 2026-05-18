@@ -10,7 +10,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReplyKeyboardRemove
 
 from botping.bot import keyboards as kb
 from botping.bot.commands import refresh_chat_commands_and_menu
@@ -284,24 +284,19 @@ def setup_router() -> Router:
                 logger.exception(
                     "Не удалось обновить команды/меню для chat_id=%s", message.chat.id
                 )
+            rm = await message.answer("\u200b", reply_markup=ReplyKeyboardRemove())
+            await rm.delete()
         await message.answer(
             "Botping: мониторинг ваших ботов через heartbeat.\n"
             "Каждый ваш бот сам раз в 30 секунд пингует Botping. Нет пинга — инцидент.\n"
             "Отдельно проверяется доступность Telegram API (getMe к admin-боту).\n"
-            "Команды: /status, /failures, /settings, /report\n"
-            "Список команд: кнопка ☰ слева от поля ввода (если не видно — "
-            "закройте и снова откройте чат).\n"
+            "Команды: /status, /failures, /settings, /report — кнопка «Меню» слева.\n"
             "Отчёт Excel — кнопка «Отчёт Excel» или команда /report.\n"
             "Добавить бота: «Боты» → «+ Добавить бота».\n"
             "MikroTik + LAN: «Роутеры и устройства» → роутер → устройства (IP) → "
             "«Установка на MikroTik»; WAN/LTE — «Переключение WAN/LTE».",
             reply_markup=kb.main_menu(),
         )
-        if message.chat.type == "private":
-            await message.answer(
-                "Быстрые команды на клавиатуре:",
-                reply_markup=kb.commands_reply_keyboard(),
-            )
 
     @router.message(Command("status"))
     async def cmd_status(
