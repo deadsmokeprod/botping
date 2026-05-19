@@ -4,12 +4,11 @@ import re
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from botping.bot import keyboards as kb
-from botping.bot.common import chunk_text, public_host_from_env
-from botping.bot.formatting import chunk_text as fmt_chunk
-from botping.bot.panel import render_panel_message, send_reference
+from botping.bot.common import public_host_from_env
+from botping.bot.panel import render_panel_message, send_reference, send_reference_document
 from botping.bot import panel_screens as screens
 from botping.bot.states import AddWebsiteModuleStates, AddWebsiteStates
 from botping.bot.websites_formatting import WEBSITES_MENU_INTRO
@@ -21,11 +20,13 @@ from botping.site_agent.snippet import build_site_agent_snippet
 SETUP_CHECKLIST = (
     "Чеклист на сервере сайта:\n"
     "• Python 3.10+ и pip install httpx\n"
-    "• Файл botping-site-agent.py\n"
-    "• cron: */1 * * * * python3 /path/botping-site-agent.py\n"
+    "• Сохраните файл <code>botping-site-agent.py</code> (ниже в чате)\n"
+    "• cron: <code>*/1 * * * * python3 /path/botping-site-agent.py</code>\n"
     "• Интернет до VPS Botping\n"
     "• 📊 Статус в боте"
 )
+
+SITE_AGENT_FILENAME = "botping-site-agent.py"
 
 
 async def _send_website_setup(bot, chat_id: int, db: Database, website_id: int) -> None:
@@ -43,11 +44,17 @@ async def _send_website_setup(bot, chat_id: int, db: Database, website_id: int) 
         bot,
         chat_id,
         f"🔧 <b>Установка агента</b> — {w['display_name']}\n"
-        f"Домен: <code>{w['host']}</code>\n\n{SETUP_CHECKLIST}\n\n"
-        f"Script botping-site-agent.py:",
+        f"Домен: <code>{w['host']}</code>\n\n{SETUP_CHECKLIST}",
     )
-    for part in fmt_chunk(snippet):
-        await send_reference(bot, chat_id, f"<pre>{part}</pre>")
+    await send_reference_document(
+        bot,
+        chat_id,
+        BufferedInputFile(
+            snippet.encode("utf-8"),
+            filename=SITE_AGENT_FILENAME,
+        ),
+        caption=f"📎 {SITE_AGENT_FILENAME} — скачайте и положите на сервер сайта",
+    )
 
 
 def register_websites_handlers(router: Router) -> None:
