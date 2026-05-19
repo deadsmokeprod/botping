@@ -40,6 +40,27 @@ def public_host_from_env() -> str:
     return "http://<IP_VPS>:{port}"
 
 
+def _telegram_api_diagnosis(stats: dict) -> str:
+    if not stats.get("total"):
+        return ""
+    parts: list[str] = []
+    failed = int(stats.get("failed") or 0)
+    if failed:
+        parts.append(f"за 24ч {failed} сбоев")
+    rl = int(stats.get("rate_limited") or 0)
+    if rl:
+        parts.append(f"429×{rl} — лимит Telegram")
+    avg_fail = stats.get("avg_fail_ms")
+    avg_ok = stats.get("avg_ok_ms")
+    if failed and not rl and avg_fail is not None and avg_fail < 150:
+        parts.append("быстрый отказ — сеть/VPS, не «лежит» Telegram")
+    elif failed and avg_ok is not None and avg_ok > 0:
+        parts.append(f"при успехе ~{avg_ok}ms")
+    if not parts:
+        return ""
+    return "\n   ↳ " + "; ".join(parts)
+
+
 def heartbeat_snippet(secret: str) -> str:
     base = public_host_from_env()
     return (
@@ -68,6 +89,7 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
     hb_timeout = int(settings["heartbeat_timeout_sec"])
     tg_last = await queries.get_last_telegram_check(db)
     tg_inc = await queries.get_open_telegram_incident(db)
+    tg_stats = await queries.get_telegram_check_stats_24h(db)
 
     lines: list[str] = ["📊 <b>Статус</b>", ""]
 
@@ -101,7 +123,11 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
             tg_rl = " ⚠️ rate_limit" if tg_last.get("rate_limited") else ""
             tg_err = f" — {tg_last['error_text']}" if tg_last["error_text"] else ""
             tg_inc_s = " 🚨" if tg_inc else ""
-            tg_line = f"☁️ Telegram API: {emoji} {tg_last['ts']}, {tg_lat}ms{tg_rl}{tg_err}{tg_inc_s}"
+            tg_diag = _telegram_api_diagnosis(tg_stats)
+            tg_line = (
+                f"☁️ Telegram API: {emoji} {tg_last['ts']}, {tg_lat}ms"
+                f"{tg_rl}{tg_err}{tg_inc_s}{tg_diag}"
+            )
         lines.append(tg_line)
     else:
         lines.append("☁️ Telegram API: ⏸ отключена")

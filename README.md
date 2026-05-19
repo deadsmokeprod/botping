@@ -352,7 +352,7 @@ WantedBy=multi-user.target
 | **Бот** | heartbeat не старше `heartbeat_timeout_sec` (по умолчанию 120 с) | После `fail_threshold` пропусков (по умолчанию 2) |
 | **Роутер** | тот же принцип по heartbeat роутера | + отдельно по каждой LAN-цели |
 | **Сайт** | heartbeat агента + `site.ok` | + отдельно по каждому модулю |
-| **Telegram API** | `getMe` раз в `telegram_api_check_interval_sec` (по умолч. 300 с) | После `fail_threshold` неудач подряд |
+| **Telegram API** | `getMe` раз в 5 мин; алерт после 10+ мин сбоя | Краткие обрывы без спама в чат |
 | **WAN/LTE** | — | Мгновенно, вне тихих часов |
 
 - **Восстановление** — сообщение всегда, даже ночью.

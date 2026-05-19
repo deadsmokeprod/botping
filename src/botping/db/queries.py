@@ -23,6 +23,9 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "disk_check_interval_sec": "300",
     "telegram_api_probe_enabled": "1",
     "telegram_api_check_interval_sec": "300",
+    "telegram_api_fail_threshold": "3",
+    "telegram_api_recover_threshold": "2",
+    "telegram_api_down_alert_sec": "600",
     "heartbeat_timeout_sec": "120",
     "heartbeat_port": "8080",
     "heartbeat_unauth_rate_per_min": "10",
@@ -339,6 +342,45 @@ async def insert_telegram_check(
     )
 
 
+async def get_telegram_check_stats_24h(db: Database) -> dict[str, Any]:
+    r = await db.fetchone(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END) AS failed,
+            SUM(rate_limited) AS rate_limited,
+            SUM(CASE WHEN error_text LIKE 'Connect%' THEN 1 ELSE 0 END) AS connect_err,
+            SUM(CASE WHEN error_text LIKE 'Read%' THEN 1 ELSE 0 END) AS read_err,
+            SUM(CASE WHEN error_text = 'timeout' THEN 1 ELSE 0 END) AS timeouts,
+            AVG(CASE WHEN ok = 1 THEN latency_ms END) AS avg_ok_ms,
+            AVG(CASE WHEN ok = 0 THEN latency_ms END) AS avg_fail_ms
+        FROM telegram_checks
+        WHERE ts >= datetime('now', '-24 hours')
+        """
+    )
+    if not r or r[0] == 0:
+        return {
+            "total": 0,
+            "failed": 0,
+            "rate_limited": 0,
+            "connect_err": 0,
+            "read_err": 0,
+            "timeouts": 0,
+            "avg_ok_ms": None,
+            "avg_fail_ms": None,
+        }
+    return {
+        "total": int(r[0]),
+        "failed": int(r[1] or 0),
+        "rate_limited": int(r[2] or 0),
+        "connect_err": int(r[3] or 0),
+        "read_err": int(r[4] or 0),
+        "timeouts": int(r[5] or 0),
+        "avg_ok_ms": int(r[6]) if r[6] is not None else None,
+        "avg_fail_ms": int(r[7]) if r[7] is not None else None,
+    }
+
+
 async def get_last_telegram_check(db: Database) -> dict[str, Any] | None:
     r = await db.fetchone(
         """
@@ -359,14 +401,17 @@ async def get_last_telegram_check(db: Database) -> dict[str, Any] | None:
     }
 
 
-async def open_telegram_incident(db: Database, last_error: str | None) -> int:
+async def open_telegram_incident(
+    db: Database, last_error: str | None, *, user_alerted: bool = True
+) -> int:
     ts = now_moscow_iso()
+    alert_ts = ts if user_alerted else None
     row = await db.write_returning_one(
         """
         INSERT INTO telegram_incidents (started_at, last_error, last_alert_at)
         VALUES (?, ?, ?) RETURNING id
         """,
-        (ts, (last_error or "")[:500], ts),
+        (ts, (last_error or "")[:500], alert_ts),
     )
     assert row is not None
     return int(row[0])
@@ -670,6 +715,15 @@ def parse_settings_row(settings: dict[str, str]) -> dict[str, Any]:
     out["telegram_api_probe_enabled"] = tp == "1"
     out["telegram_api_check_interval_sec"] = max(
         60, int(settings.get("telegram_api_check_interval_sec", "300"))
+    )
+    out["telegram_api_fail_threshold"] = max(
+        1, int(settings.get("telegram_api_fail_threshold", "3"))
+    )
+    out["telegram_api_recover_threshold"] = max(
+        1, int(settings.get("telegram_api_recover_threshold", "2"))
+    )
+    out["telegram_api_down_alert_sec"] = max(
+        0, int(settings.get("telegram_api_down_alert_sec", "600"))
     )
     out["heartbeat_timeout_sec"] = max(30, int(settings.get("heartbeat_timeout_sec", "120")))
     out["heartbeat_port"] = max(1, min(65535, int(settings.get("heartbeat_port", "8080"))))

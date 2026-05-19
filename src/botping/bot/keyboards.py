@@ -145,6 +145,18 @@ def settings_menu() -> InlineKeyboardMarkup:
                         callback_data="set:telegram_api_check_interval_sec",
                     )
                 ],
+                [
+                    InlineKeyboardButton(
+                        text="☁️ Порог сбоев Telegram",
+                        callback_data="set:telegram_api_fail_threshold",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="☁️ Задержка алерта Telegram (с)",
+                        callback_data="set:telegram_api_down_alert_sec",
+                    )
+                ],
                 [InlineKeyboardButton(text="💾 Порог диска (%)", callback_data="set:disk_usage_threshold_pct")],
                 [InlineKeyboardButton(text="🔄 Интервал диска (с)", callback_data="set:disk_check_interval_sec")],
             ]

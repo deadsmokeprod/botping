@@ -79,7 +79,11 @@ async def probe_getme_api(
         return ProbeResult(None, False, ms, None, "timeout", False)
     except httpx.RequestError as e:
         ms = int((time.perf_counter() - t0) * 1000)
-        return ProbeResult(None, False, ms, None, str(e.__class__.__name__), False)
+        err = e.__class__.__name__
+        detail = str(e).strip()
+        if detail:
+            err = f"{err}: {detail[:120]}"
+        return ProbeResult(None, False, ms, None, err, False)
 
     ms = int((time.perf_counter() - t0) * 1000)
     status = resp.status_code
