@@ -25,3 +25,17 @@ class AddRouterStates(StatesGroup):
 class AddTargetStates(StatesGroup):
     waiting_name = State()
     waiting_address = State()
+
+
+class AddWebsiteStates(StatesGroup):
+    waiting_name = State()
+    waiting_host = State()
+
+
+class AddWebsiteModuleStates(StatesGroup):
+    waiting_name = State()
+    waiting_hint = State()
+
+
+class RenameNameStates(StatesGroup):
+    waiting_value = State()

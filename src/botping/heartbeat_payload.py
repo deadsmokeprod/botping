@@ -22,6 +22,15 @@ class ParsedCheckItem:
 
 
 @dataclass(frozen=True)
+class ParsedSiteStatus:
+    host: str | None
+    ip: str | None
+    ok: bool
+    latency_ms: int | None
+    error: str | None
+
+
+@dataclass(frozen=True)
 class ParsedEventItem:
     event_type: str
     custom_text: str | None
@@ -31,10 +40,11 @@ class ParsedEventItem:
 class ParsedHeartbeatPayload:
     checks: list[ParsedCheckItem]
     events: list[ParsedEventItem]
+    site: ParsedSiteStatus | None
 
 
 def parse_heartbeat_payload(body: bytes | None) -> ParsedHeartbeatPayload | None:
-    """None = пустое тело / не JSON (только touch роутера)."""
+    """None = пустое тело / не JSON (только touch роутера или сайта)."""
     if not body:
         return None
     raw = body.strip()
@@ -49,10 +59,51 @@ def parse_heartbeat_payload(body: bytes | None) -> ParsedHeartbeatPayload | None
 
     checks = _parse_checks(data.get("checks"))
     events = _parse_events(data.get("events"))
+    site = _parse_site(data.get("site"))
 
-    if not checks and not events and data.get("checks") is None and data.get("events") is None:
+    if (
+        not checks
+        and not events
+        and site is None
+        and data.get("checks") is None
+        and data.get("events") is None
+        and data.get("site") is None
+    ):
         return None
-    return ParsedHeartbeatPayload(checks=checks, events=events)
+    return ParsedHeartbeatPayload(checks=checks, events=events, site=site)
+
+
+def _parse_site(site_raw: Any) -> ParsedSiteStatus | None:
+    if site_raw is None:
+        return None
+    if not isinstance(site_raw, dict):
+        raise ValueError("invalid_site")
+    if "ok" not in site_raw:
+        return None
+    ok = site_raw["ok"]
+    if not isinstance(ok, bool):
+        if isinstance(ok, int):
+            ok = ok != 0
+        else:
+            raise ValueError("invalid_site")
+    host: str | None = None
+    if site_raw.get("host") is not None:
+        host = str(site_raw["host"]).strip() or None
+    ip: str | None = None
+    if site_raw.get("ip") is not None:
+        ip = str(site_raw["ip"]).strip()[:64] or None
+    ms: int | None = None
+    if site_raw.get("ms") is not None:
+        try:
+            ms_val = int(site_raw["ms"])
+            if ms_val >= 0:
+                ms = ms_val
+        except (TypeError, ValueError):
+            pass
+    err: str | None = None
+    if site_raw.get("error") is not None:
+        err = str(site_raw["error"])[:MAX_ERROR_LEN] or None
+    return ParsedSiteStatus(host=host, ip=ip, ok=ok, latency_ms=ms, error=err)
 
 
 def _parse_checks(checks_raw: Any) -> list[ParsedCheckItem]:

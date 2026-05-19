@@ -142,6 +142,66 @@ class Database:
                 source_ip TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_router_events_router_ts ON router_events(router_id, created_at);
+            CREATE TABLE IF NOT EXISTS monitored_websites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                host TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                heartbeat_secret TEXT NOT NULL UNIQUE,
+                last_heartbeat_at TEXT,
+                last_heartbeat_ip TEXT,
+                last_resolved_ip TEXT,
+                last_site_ok_at TEXT,
+                last_site_latency_ms INTEGER,
+                last_site_error TEXT,
+                UNIQUE(host)
+            );
+            CREATE TABLE IF NOT EXISTS website_modules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                website_id INTEGER NOT NULL REFERENCES monitored_websites(id) ON DELETE CASCADE,
+                display_name TEXT NOT NULL,
+                check_hint TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_ok_at TEXT,
+                last_latency_ms INTEGER,
+                last_error TEXT,
+                UNIQUE(website_id, display_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_website_modules_website ON website_modules(website_id);
+            CREATE TABLE IF NOT EXISTS website_module_checks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                module_id INTEGER NOT NULL REFERENCES website_modules(id) ON DELETE CASCADE,
+                ts TEXT NOT NULL DEFAULT (datetime('now')),
+                ok INTEGER NOT NULL,
+                latency_ms INTEGER,
+                error_text TEXT,
+                check_type TEXT NOT NULL DEFAULT 'module_push'
+            );
+            CREATE INDEX IF NOT EXISTS idx_website_module_checks_module_ts ON website_module_checks(module_id, ts);
+            CREATE TABLE IF NOT EXISTS website_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                website_id INTEGER NOT NULL REFERENCES monitored_websites(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                ended_at TEXT,
+                last_error TEXT,
+                last_alert_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_website_incidents_open ON website_incidents(website_id) WHERE ended_at IS NULL;
+            CREATE TABLE IF NOT EXISTS website_module_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                module_id INTEGER NOT NULL REFERENCES website_modules(id) ON DELETE CASCADE,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                ended_at TEXT,
+                last_error TEXT,
+                last_alert_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_website_module_incidents_open ON website_module_incidents(module_id) WHERE ended_at IS NULL;
+            CREATE TABLE IF NOT EXISTS admin_chat_ui (
+                chat_id INTEGER PRIMARY KEY,
+                panel_message_id INTEGER,
+                panel_ids TEXT NOT NULL DEFAULT '[]'
+            );
             """
         )
         await self._conn.commit()

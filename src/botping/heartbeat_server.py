@@ -181,11 +181,16 @@ class HeartbeatServer:
             return web.Response(status=404)
 
         cache = await self._get_secrets()
-        matched_kind: Literal["bot", "router"] | None = None
+        matched_kind: Literal["bot", "router", "website"] | None = None
         matched_id: int | None = None
         for kind, eid, sec in cache:
             if hmac.compare_digest(secret, sec):
-                matched_kind = "bot" if kind == "bot" else "router"
+                if kind == "bot":
+                    matched_kind = "bot"
+                elif kind == "website":
+                    matched_kind = "website"
+                else:
+                    matched_kind = "router"
                 matched_id = eid
                 break
 
@@ -222,7 +227,6 @@ class HeartbeatServer:
             self._fails.pop(ip, None)
             return web.json_response({"ok": True, "bot_id": matched_id})
 
-        # router
         body = await request.read()
         if len(body) > _MAX_HEARTBEAT_BODY:
             return web.json_response({"ok": False, "error": "body_too_large"}, status=413)
@@ -231,6 +235,69 @@ class HeartbeatServer:
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
 
+        if matched_kind == "website":
+            wid = matched_id
+            assert wid is not None
+            try:
+                await queries.touch_website_heartbeat(self._db, wid, ip)
+            except Exception:
+                logger.exception("touch_website_heartbeat failed")
+
+            if payload is not None and payload.site is not None:
+                site = payload.site
+                err = site.error
+                if not site.ok and not err:
+                    err = "unreachable"
+                try:
+                    await queries.apply_website_site_push(
+                        self._db,
+                        wid,
+                        host=site.host,
+                        resolved_ip=site.ip,
+                        ok=site.ok,
+                        latency_ms=site.latency_ms,
+                        error_text=err,
+                    )
+                except Exception:
+                    logger.exception("apply_website_site_push failed")
+
+            matched_modules = 0
+            ignored = 0
+            if payload is not None and payload.checks:
+                for item in payload.checks:
+                    mod = await queries.find_website_module(
+                        self._db,
+                        wid,
+                        module_id=item.target_id,
+                    )
+                    if mod is None or not mod.get("enabled", True):
+                        ignored += 1
+                        continue
+                    mid = int(mod["id"])
+                    err = item.error
+                    if not item.ok and not err:
+                        err = "unreachable"
+                    await queries.apply_website_module_push(
+                        self._db,
+                        mid,
+                        item.ok,
+                        item.latency_ms,
+                        err,
+                    )
+                    matched_modules += 1
+
+            self._recent_success[ip] = now
+            self._fails.pop(ip, None)
+            return web.json_response(
+                {
+                    "ok": True,
+                    "website_id": wid,
+                    "matched": matched_modules,
+                    "ignored": ignored,
+                }
+            )
+
+        # router
         try:
             await queries.touch_router_heartbeat(self._db, matched_id, ip)
         except Exception:

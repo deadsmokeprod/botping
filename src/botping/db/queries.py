@@ -152,7 +152,7 @@ async def list_heartbeat_secrets(db: Database) -> list[tuple[int, str]]:
 async def list_heartbeat_secrets_for_cache(
     db: Database,
 ) -> list[tuple[str, int, str]]:
-    """(kind, entity_id, secret) — kind: 'bot' | 'router'."""
+    """(kind, entity_id, secret) — kind: 'bot' | 'router' | 'website'."""
     bots = await list_heartbeat_secrets(db)
     out: list[tuple[str, int, str]] = [("bot", bid, sec) for bid, sec in bots]
     rows = await db.fetchall(
@@ -160,6 +160,11 @@ async def list_heartbeat_secrets_for_cache(
     )
     for r in rows:
         out.append(("router", int(r[0]), str(r[1])))
+    wrows = await db.fetchall(
+        "SELECT id, heartbeat_secret FROM monitored_websites WHERE heartbeat_secret != ''"
+    )
+    for r in wrows:
+        out.append(("website", int(r[0]), str(r[1])))
     return out
 
 
@@ -175,13 +180,26 @@ async def heartbeat_secret_in_use(db: Database, secret: str, exclude: str | None
         "SELECT 1 FROM monitored_routers WHERE heartbeat_secret = ? AND heartbeat_secret != ? LIMIT 1",
         (secret, ex),
     )
-    return r2 is not None
+    if r2:
+        return True
+    r3 = await db.fetchone(
+        "SELECT 1 FROM monitored_websites WHERE heartbeat_secret = ? AND heartbeat_secret != ? LIMIT 1",
+        (secret, ex),
+    )
+    return r3 is not None
 
 
 async def update_bot_enabled(db: Database, bot_id: int, enabled: bool) -> None:
     await db.execute(
         "UPDATE monitored_bots SET enabled = ? WHERE id = ?",
         (1 if enabled else 0, bot_id),
+    )
+
+
+async def update_bot_display_name(db: Database, bot_id: int, display_name: str) -> None:
+    await db.execute(
+        "UPDATE monitored_bots SET display_name = ? WHERE id = ?",
+        (display_name.strip(), bot_id),
     )
 
 
@@ -763,6 +781,13 @@ async def update_router_enabled(db: Database, router_id: int, enabled: bool) -> 
     )
 
 
+async def update_router_display_name(db: Database, router_id: int, display_name: str) -> None:
+    await db.execute(
+        "UPDATE monitored_routers SET display_name = ? WHERE id = ?",
+        (display_name.strip(), router_id),
+    )
+
+
 async def delete_monitored_router(db: Database, router_id: int) -> None:
     await db.execute("DELETE FROM monitored_routers WHERE id = ?", (router_id,))
 
@@ -809,6 +834,15 @@ async def update_router_target_enabled(
     await db.execute(
         "UPDATE router_targets SET enabled = ? WHERE id = ?",
         (1 if enabled else 0, target_id),
+    )
+
+
+async def update_router_target_display_name(
+    db: Database, target_id: int, display_name: str
+) -> None:
+    await db.execute(
+        "UPDATE router_targets SET display_name = ? WHERE id = ?",
+        (display_name.strip(), target_id),
     )
 
 
@@ -1079,8 +1113,564 @@ async def list_all_incidents_in_range(
                 "last_error": r[7] or "",
             }
         )
+    website_rows = await db.fetchall(
+        """
+        SELECT i.id, i.website_id, w.display_name, w.host, i.started_at, i.ended_at, i.last_error
+        FROM website_incidents i
+        JOIN monitored_websites w ON w.id = i.website_id
+        WHERE i.started_at >= ? AND i.started_at <= ?
+        ORDER BY i.started_at DESC LIMIT 200
+        """,
+        (start_iso, end_iso),
+    )
+    for r in website_rows:
+        out.append(
+            {
+                "entity_type": "website",
+                "id": r[0],
+                "entity_id": r[1],
+                "display_name": f"{r[2]} ({r[3]})",
+                "started_at": r[4],
+                "ended_at": r[5],
+                "last_error": r[6] or "",
+            }
+        )
+    mod_rows = await db.fetchall(
+        """
+        SELECT i.id, i.module_id, m.display_name, w.display_name, w.host,
+               i.started_at, i.ended_at, i.last_error
+        FROM website_module_incidents i
+        JOIN website_modules m ON m.id = i.module_id
+        JOIN monitored_websites w ON w.id = m.website_id
+        WHERE i.started_at >= ? AND i.started_at <= ?
+        ORDER BY i.started_at DESC LIMIT 200
+        """,
+        (start_iso, end_iso),
+    )
+    for r in mod_rows:
+        out.append(
+            {
+                "entity_type": "web_module",
+                "id": r[0],
+                "entity_id": r[1],
+                "display_name": f"{r[3]} / {r[2]} ({r[4]})",
+                "started_at": r[5],
+                "ended_at": r[6],
+                "last_error": r[7] or "",
+            }
+        )
     out.sort(key=lambda x: str(x["started_at"]), reverse=True)
     return out[:500]
+
+
+# ── Monitored websites / modules ──────────────────────────────────────
+
+_WEBSITE_COLUMNS = (
+    "id, display_name, host, enabled, created_at, heartbeat_secret, "
+    "last_heartbeat_at, last_heartbeat_ip, last_resolved_ip, "
+    "last_site_ok_at, last_site_latency_ms, last_site_error"
+)
+
+_MODULE_COLUMNS = (
+    "id, website_id, display_name, check_hint, enabled, "
+    "last_ok_at, last_latency_ms, last_error"
+)
+
+
+def _row_to_website(r: aiosqlite.Row | tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": r[0],
+        "display_name": r[1],
+        "host": r[2],
+        "enabled": bool(r[3]),
+        "created_at": r[4],
+        "heartbeat_secret": r[5],
+        "last_heartbeat_at": r[6],
+        "last_heartbeat_ip": r[7],
+        "last_resolved_ip": r[8],
+        "last_site_ok_at": r[9],
+        "last_site_latency_ms": r[10],
+        "last_site_error": r[11],
+    }
+
+
+def _row_to_module(r: aiosqlite.Row | tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        "id": r[0],
+        "website_id": r[1],
+        "display_name": r[2],
+        "check_hint": r[3],
+        "enabled": bool(r[4]),
+        "last_ok_at": r[5],
+        "last_latency_ms": r[6],
+        "last_error": r[7],
+    }
+
+
+def normalize_website_host(raw: str) -> str:
+    s = raw.strip().lower()
+    for prefix in ("https://", "http://"):
+        if s.startswith(prefix):
+            s = s[len(prefix) :]
+    s = s.split("/")[0].split("?")[0].strip()
+    if s.startswith("www."):
+        s = s[4:]
+    return s
+
+
+async def list_monitored_websites(db: Database) -> list[dict[str, Any]]:
+    rows = await db.fetchall(
+        f"SELECT {_WEBSITE_COLUMNS} FROM monitored_websites ORDER BY id"
+    )
+    return [_row_to_website(r) for r in rows]
+
+
+async def get_monitored_website(db: Database, website_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        f"SELECT {_WEBSITE_COLUMNS} FROM monitored_websites WHERE id = ?",
+        (website_id,),
+    )
+    if not r:
+        return None
+    return _row_to_website(r)
+
+
+async def insert_monitored_website(
+    db: Database, display_name: str, host: str, heartbeat_secret: str
+) -> int:
+    row = await db.write_returning_one(
+        """
+        INSERT INTO monitored_websites
+            (display_name, host, enabled, created_at, heartbeat_secret)
+        VALUES (?, ?, 1, ?, ?) RETURNING id
+        """,
+        (display_name.strip(), normalize_website_host(host), now_moscow_iso(), heartbeat_secret),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def touch_website_heartbeat(db: Database, website_id: int, ip: str | None) -> None:
+    await db.execute(
+        """
+        UPDATE monitored_websites
+        SET last_heartbeat_at = ?, last_heartbeat_ip = ?
+        WHERE id = ?
+        """,
+        (now_moscow_iso(), (ip or "")[:64] or None, website_id),
+    )
+
+
+async def apply_website_site_push(
+    db: Database,
+    website_id: int,
+    *,
+    host: str | None,
+    resolved_ip: str | None,
+    ok: bool,
+    latency_ms: int | None,
+    error_text: str | None,
+) -> None:
+    ts = now_moscow_iso()
+    err_val = None if ok else ((error_text or "")[:500] or "unreachable")
+    sets = [
+        "last_site_ok_at = ?",
+        "last_site_latency_ms = ?",
+        "last_site_error = ?",
+    ]
+    params: list[Any] = [ts, latency_ms, err_val]
+    if resolved_ip is not None:
+        sets.append("last_resolved_ip = ?")
+        params.append(resolved_ip[:64] or None)
+    if host:
+        sets.append("host = ?")
+        params.append(normalize_website_host(host))
+    params.append(website_id)
+    await db.execute(
+        f"UPDATE monitored_websites SET {', '.join(sets)} WHERE id = ?",
+        tuple(params),
+    )
+
+
+async def regenerate_website_heartbeat_secret(
+    db: Database, website_id: int, new_secret: str
+) -> None:
+    await db.execute(
+        "UPDATE monitored_websites SET heartbeat_secret = ? WHERE id = ?",
+        (new_secret, website_id),
+    )
+
+
+async def update_website_enabled(db: Database, website_id: int, enabled: bool) -> None:
+    await db.execute(
+        "UPDATE monitored_websites SET enabled = ? WHERE id = ?",
+        (1 if enabled else 0, website_id),
+    )
+
+
+async def update_website_display_name(db: Database, website_id: int, display_name: str) -> None:
+    await db.execute(
+        "UPDATE monitored_websites SET display_name = ? WHERE id = ?",
+        (display_name.strip(), website_id),
+    )
+
+
+async def delete_monitored_website(db: Database, website_id: int) -> None:
+    await db.execute("DELETE FROM monitored_websites WHERE id = ?", (website_id,))
+
+
+async def list_website_modules(
+    db: Database, website_id: int, *, enabled_only: bool = False
+) -> list[dict[str, Any]]:
+    sql = f"SELECT {_MODULE_COLUMNS} FROM website_modules WHERE website_id = ?"
+    params: tuple[Any, ...] = (website_id,)
+    if enabled_only:
+        sql += " AND enabled = 1"
+    sql += " ORDER BY id"
+    rows = await db.fetchall(sql, params)
+    return [_row_to_module(r) for r in rows]
+
+
+async def get_website_module(db: Database, module_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        f"SELECT {_MODULE_COLUMNS} FROM website_modules WHERE id = ?",
+        (module_id,),
+    )
+    if not r:
+        return None
+    return _row_to_module(r)
+
+
+async def insert_website_module(
+    db: Database,
+    website_id: int,
+    display_name: str,
+    check_hint: str | None = None,
+) -> int:
+    hint = (check_hint or "").strip() or None
+    row = await db.write_returning_one(
+        """
+        INSERT INTO website_modules (website_id, display_name, check_hint, enabled)
+        VALUES (?, ?, ?, 1) RETURNING id
+        """,
+        (website_id, display_name.strip(), hint),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def update_website_module_enabled(
+    db: Database, module_id: int, enabled: bool
+) -> None:
+    await db.execute(
+        "UPDATE website_modules SET enabled = ? WHERE id = ?",
+        (1 if enabled else 0, module_id),
+    )
+
+
+async def update_website_module_display_name(
+    db: Database, module_id: int, display_name: str
+) -> None:
+    await db.execute(
+        "UPDATE website_modules SET display_name = ? WHERE id = ?",
+        (display_name.strip(), module_id),
+    )
+
+
+async def delete_website_module(db: Database, module_id: int) -> None:
+    await db.execute("DELETE FROM website_modules WHERE id = ?", (module_id,))
+
+
+async def find_website_module(
+    db: Database, website_id: int, *, module_id: int | None = None
+) -> dict[str, Any] | None:
+    if module_id is not None:
+        r = await db.fetchone(
+            f"SELECT {_MODULE_COLUMNS} FROM website_modules WHERE website_id = ? AND id = ?",
+            (website_id, module_id),
+        )
+        if r:
+            return _row_to_module(r)
+    return None
+
+
+async def apply_website_module_push(
+    db: Database,
+    module_id: int,
+    ok: bool,
+    latency_ms: int | None,
+    error_text: str | None,
+) -> None:
+    ts = now_moscow_iso()
+    err_val = None if ok else ((error_text or "")[:500] or "unreachable")
+    await db.execute(
+        """
+        UPDATE website_modules
+        SET last_ok_at = ?, last_latency_ms = ?, last_error = ?
+        WHERE id = ?
+        """,
+        (ts, latency_ms, err_val, module_id),
+    )
+    await insert_website_module_check(
+        db, module_id, ok, latency_ms, error_text, check_type="module_push"
+    )
+
+
+async def insert_website_module_check(
+    db: Database,
+    module_id: int,
+    ok: bool,
+    latency_ms: int | None,
+    error_text: str | None,
+    check_type: str = "module_push",
+) -> None:
+    await db.execute(
+        """
+        INSERT INTO website_module_checks (module_id, ok, latency_ms, error_text, ts, check_type)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (
+            module_id,
+            1 if ok else 0,
+            latency_ms,
+            (error_text or "")[:500],
+            now_moscow_iso(),
+            check_type,
+        ),
+    )
+
+
+async def open_website_incident(db: Database, website_id: int, last_error: str | None) -> int:
+    ts = now_moscow_iso()
+    row = await db.write_returning_one(
+        """
+        INSERT INTO website_incidents (website_id, last_error, started_at, last_alert_at)
+        VALUES (?, ?, ?, ?) RETURNING id
+        """,
+        (website_id, (last_error or "")[:500], ts, ts),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def get_open_website_incident(db: Database, website_id: int) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, website_id, started_at, ended_at, last_error, last_alert_at
+        FROM website_incidents WHERE website_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1
+        """,
+        (website_id,),
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "website_id": r[1],
+        "started_at": r[2],
+        "ended_at": r[3],
+        "last_error": r[4],
+        "last_alert_at": r[5],
+    }
+
+
+async def update_website_incident_error(db: Database, incident_id: int, last_error: str) -> None:
+    await db.execute(
+        "UPDATE website_incidents SET last_error = ? WHERE id = ?",
+        ((last_error or "")[:500], incident_id),
+    )
+
+
+async def touch_website_incident_alert(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE website_incidents SET last_alert_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def close_website_incident(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE website_incidents SET ended_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def open_website_module_incident(
+    db: Database, module_id: int, last_error: str | None
+) -> int:
+    ts = now_moscow_iso()
+    row = await db.write_returning_one(
+        """
+        INSERT INTO website_module_incidents (module_id, last_error, started_at, last_alert_at)
+        VALUES (?, ?, ?, ?) RETURNING id
+        """,
+        (module_id, (last_error or "")[:500], ts, ts),
+    )
+    assert row is not None
+    return int(row[0])
+
+
+async def get_open_website_module_incident(
+    db: Database, module_id: int
+) -> dict[str, Any] | None:
+    r = await db.fetchone(
+        """
+        SELECT id, module_id, started_at, ended_at, last_error, last_alert_at
+        FROM website_module_incidents WHERE module_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1
+        """,
+        (module_id,),
+    )
+    if not r:
+        return None
+    return {
+        "id": r[0],
+        "module_id": r[1],
+        "started_at": r[2],
+        "ended_at": r[3],
+        "last_error": r[4],
+        "last_alert_at": r[5],
+    }
+
+
+async def update_website_module_incident_error(
+    db: Database, incident_id: int, last_error: str
+) -> None:
+    await db.execute(
+        "UPDATE website_module_incidents SET last_error = ? WHERE id = ?",
+        ((last_error or "")[:500], incident_id),
+    )
+
+
+async def touch_website_module_incident_alert(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE website_module_incidents SET last_alert_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+async def close_website_module_incident(db: Database, incident_id: int) -> None:
+    await db.execute(
+        "UPDATE website_module_incidents SET ended_at = ? WHERE id = ?",
+        (now_moscow_iso(), incident_id),
+    )
+
+
+EXPORT_WEBSITE_MODULE_CHECKS_LIMIT = 200_000
+
+
+async def export_website_module_checks_for_report(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_WEBSITE_MODULE_CHECKS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT c.id, c.module_id, m.display_name, w.display_name, w.host,
+               c.ts, c.ok, c.latency_ms, c.error_text, c.check_type
+        FROM website_module_checks c
+        JOIN website_modules m ON m.id = c.module_id
+        JOIN monitored_websites w ON w.id = m.website_id
+        WHERE c.ts >= ? AND c.ts <= ?
+        ORDER BY c.ts ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_WEBSITE_MODULE_CHECKS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_WEBSITE_MODULE_CHECKS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "module_id": r[1],
+            "module_name": r[2],
+            "website_name": r[3],
+            "host": r[4],
+            "ts": r[5],
+            "ok": bool(r[6]),
+            "latency_ms": r[7],
+            "error_text": r[8] or "",
+            "check_type": r[9] or "module_push",
+        }
+        for r in rows
+    ]
+    return out, truncated
+
+
+async def export_website_incidents_overlapping(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_INCIDENTS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT i.id, i.website_id, w.display_name, w.host, i.started_at, i.ended_at,
+               i.last_error, i.last_alert_at
+        FROM website_incidents i
+        JOIN monitored_websites w ON w.id = i.website_id
+        WHERE (i.ended_at IS NULL OR i.ended_at >= ?) AND i.started_at <= ?
+        ORDER BY i.started_at ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_INCIDENTS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_INCIDENTS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "website_id": r[1],
+            "display_name": r[2],
+            "host": r[3],
+            "started_at": r[4],
+            "ended_at": r[5],
+            "last_error": r[6] or "",
+            "last_alert_at": r[7],
+        }
+        for r in rows
+    ]
+    return out, truncated
+
+
+async def export_website_module_incidents_overlapping(
+    db: Database,
+    start_iso: str,
+    end_iso: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    lim = EXPORT_INCIDENTS_LIMIT + 1
+    rows = await db.fetchall(
+        """
+        SELECT i.id, i.module_id, m.display_name, w.display_name, w.host,
+               i.started_at, i.ended_at, i.last_error, i.last_alert_at
+        FROM website_module_incidents i
+        JOIN website_modules m ON m.id = i.module_id
+        JOIN monitored_websites w ON w.id = m.website_id
+        WHERE (i.ended_at IS NULL OR i.ended_at >= ?) AND i.started_at <= ?
+        ORDER BY i.started_at ASC
+        LIMIT ?
+        """,
+        (start_iso, end_iso, lim),
+    )
+    truncated = len(rows) > EXPORT_INCIDENTS_LIMIT
+    if truncated:
+        rows = rows[:EXPORT_INCIDENTS_LIMIT]
+    out = [
+        {
+            "id": r[0],
+            "module_id": r[1],
+            "module_name": r[2],
+            "website_name": r[3],
+            "host": r[4],
+            "started_at": r[5],
+            "ended_at": r[6],
+            "last_error": r[7] or "",
+            "last_alert_at": r[8],
+        }
+        for r in rows
+    ]
+    return out, truncated
 
 
 EXPORT_ROUTER_TARGET_CHECKS_LIMIT = 200_000
@@ -1341,3 +1931,46 @@ async def delete_oldest_audit(db: Database, limit: int) -> int:
         (limit,),
     )
     return cur.rowcount
+
+
+def _parse_panel_ids_json(raw: str | None) -> list[int]:
+    if not raw or not str(raw).strip():
+        return []
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return []
+        return [int(x) for x in data if isinstance(x, (int, float, str)) and str(x).isdigit()]
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+
+
+async def load_admin_chat_ui(db: Database, chat_id: int) -> tuple[int | None, list[int]]:
+    row = await db.fetchone(
+        "SELECT panel_message_id, panel_ids FROM admin_chat_ui WHERE chat_id = ?",
+        (chat_id,),
+    )
+    if not row:
+        return None, []
+    mid = int(row[0]) if row[0] is not None else None
+    return mid, _parse_panel_ids_json(str(row[1]) if row[1] is not None else "[]")
+
+
+async def save_admin_chat_ui(
+    db: Database,
+    chat_id: int,
+    *,
+    panel_message_id: int | None,
+    panel_ids: list[int],
+) -> None:
+    unique_ids = list(dict.fromkeys(panel_ids))
+    await db.execute(
+        """
+        INSERT INTO admin_chat_ui (chat_id, panel_message_id, panel_ids)
+        VALUES (?, ?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            panel_message_id = excluded.panel_message_id,
+            panel_ids = excluded.panel_ids
+        """,
+        (chat_id, panel_message_id, json.dumps(unique_ids)),
+    )

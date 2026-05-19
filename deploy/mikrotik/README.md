@@ -4,7 +4,7 @@ Botping мониторит MikroTik и устройства в LAN через **
 
 ## Установка (RouterOS 7)
 
-1. В admin-боте Botping: **Роутеры и устройства** → **+ Добавить роутер** → устройства (IP в LAN) → **Установка на MikroTik** — скопируйте сниппет.
+1. В admin-боте Botping: **🌐 Роутеры** → **+ Добавить роутер** → устройства (IP в LAN) → **Установка MikroTik** — скопируйте сниппет.
 2. На роутере: **System → Scripts** → `+` → имя `botping-lan` → вставьте тело script из сниппета.
 3. **System → Scheduler** → `+`:
    - Name: `botping-lan`
@@ -36,7 +36,7 @@ Botping мониторит MikroTik и устройства в LAN через **
 
 Не путать с мониторингом устройств в LAN: это **мгновенное** сообщение в Telegram, когда роутер ушёл на LTE или вернулся на WAN.
 
-1. В admin-боте: **Роутеры и устройства** → роутер → **Переключение WAN/LTE** — скопируйте два скрипта `botping-internet-lte` и `botping-internet-wan`.
+1. В admin-боте: **🌐 Роутеры** → роутер → **WAN/LTE** — скопируйте два скрипта `botping-internet-lte` и `botping-internet-wan`.
 2. В скриптах failover (`Check_Internet`, `UPLink_WAN`) добавьте вызов (см. конец сниппета в боте).
 3. Проверка: **Run Script** → `botping-internet-lte` — в Telegram и в **Журнал переключений**.
 

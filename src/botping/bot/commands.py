@@ -16,11 +16,11 @@ from aiogram.types import (
 logger = logging.getLogger(__name__)
 
 BOT_COMMANDS: list[BotCommand] = [
-    BotCommand(command="start", description="Обновить интерфейс"),
-    BotCommand(command="status", description="Состояние ботов, Telegram API и диск"),
-    BotCommand(command="failures", description="Инциденты за 7 дней (или даты)"),
-    BotCommand(command="report", description="Excel-отчёт за период"),
-    BotCommand(command="settings", description="Параметры мониторинга"),
+    BotCommand(command="start", description="🔄 Обновить интерфейс"),
+    BotCommand(command="status", description="📊 Статус ботов, роутеров и сайтов"),
+    BotCommand(command="failures", description="⚠️ Сбои за 7 дней"),
+    BotCommand(command="report", description="📈 Excel-отчёт"),
+    BotCommand(command="settings", description="⚙️ Настройки"),
 ]
 
 _MENU_BUTTON = MenuButtonCommands()

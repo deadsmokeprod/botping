@@ -103,6 +103,13 @@ def build_availability_report(
     router_checks_truncated: bool = False,
     router_incidents_truncated: bool = False,
     router_target_incidents_truncated: bool = False,
+    websites: list[dict[str, Any]] | None = None,
+    website_module_checks: list[dict[str, Any]] | None = None,
+    website_incidents: list[dict[str, Any]] | None = None,
+    website_module_incidents: list[dict[str, Any]] | None = None,
+    website_checks_truncated: bool = False,
+    website_incidents_truncated: bool = False,
+    website_module_incidents_truncated: bool = False,
 ) -> bytes:
     telegram_checks = telegram_checks or []
     routers = routers or []
@@ -110,6 +117,10 @@ def build_availability_report(
     router_incidents = router_incidents or []
     router_target_incidents = router_target_incidents or []
     telegram_incidents = telegram_incidents or []
+    websites = websites or []
+    website_module_checks = website_module_checks or []
+    website_incidents = website_incidents or []
+    website_module_incidents = website_module_incidents or []
 
     wb = Workbook()
 
@@ -542,6 +553,93 @@ def build_availability_report(
             ])
         wsri.freeze_panes = "A2"
         _autosize(wsri)
+
+    if websites:
+        wsw = wb.create_sheet("Сайты")
+        wsw.append([
+            "ID",
+            "Имя",
+            "Домен",
+            "Включён",
+            "IP",
+            "Последний heartbeat",
+            "Агент IP",
+        ])
+        _style_header(wsw, 1, 7)
+        for w in websites:
+            wsw.append([
+                w["id"],
+                w["display_name"],
+                w["host"],
+                "да" if w["enabled"] else "нет",
+                w.get("last_resolved_ip") or "—",
+                w.get("last_heartbeat_at") or "—",
+                w.get("last_heartbeat_ip") or "—",
+            ])
+        _autosize(wsw)
+
+    if website_module_checks:
+        wsmc = wb.create_sheet("Проверки модулей")
+        wsmc.append([
+            "Время",
+            "Сайт",
+            "Модуль",
+            "Домен",
+            "Статус",
+            "мс",
+            "Ошибка",
+            "Тип",
+        ])
+        _style_header(wsmc, 1, 8)
+        for r in website_module_checks:
+            wsmc.append([
+                r["ts"],
+                r["website_name"],
+                r["module_name"],
+                r["host"],
+                "Живой" if r["ok"] else "Недоступен",
+                r["latency_ms"] if r["latency_ms"] is not None else "",
+                r["error_text"] or "",
+                r.get("check_type") or "module_push",
+            ])
+        wsmc.freeze_panes = "A2"
+        _autosize(wsmc)
+
+    if website_incidents or website_module_incidents:
+        wswi = wb.create_sheet("Инциденты веб")
+        wswi.append([
+            "Тип",
+            "Объект",
+            "Начало",
+            "Конец",
+            "Длительность",
+            "Ошибка",
+        ])
+        _style_header(wswi, 1, 6)
+        for r in website_incidents:
+            dur = _incident_duration_sec(r, period_end, generated_at)
+            label = f"{r['display_name']} ({r['host']})"
+            wswi.append([
+                "сайт",
+                label,
+                r["started_at"],
+                r["ended_at"] or "",
+                _format_minutes(dur),
+                r["last_error"] or "",
+            ])
+        for r in website_module_incidents:
+            dur = _incident_duration_sec(r, period_end, generated_at)
+            label = f"{r['website_name']} / {r['module_name']} ({r['host']})"
+            wswi.append([
+                "модуль",
+                label,
+                r["started_at"],
+                r["ended_at"] or "",
+                _format_minutes(dur),
+                r["last_error"] or "",
+            ])
+        wswi.freeze_panes = "A2"
+        _autosize(wswi)
 
     buf = io.BytesIO()
     wb.save(buf)

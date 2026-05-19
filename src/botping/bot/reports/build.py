@@ -39,6 +39,16 @@ async def build_availability_report_bundle(
     rt_incidents, rti_trunc = await queries.export_router_target_incidents_overlapping(
         db, start_iso, end_iso
     )
+    websites = await queries.list_monitored_websites(db)
+    wm_checks, wmc_trunc = await queries.export_website_module_checks_for_report(
+        db, start_iso, end_iso
+    )
+    w_incidents, wi_trunc = await queries.export_website_incidents_overlapping(
+        db, start_iso, end_iso
+    )
+    wm_incidents, wmi_trunc = await queries.export_website_module_incidents_overlapping(
+        db, start_iso, end_iso
+    )
     settings_rows = await queries.list_settings_raw_pairs_for_report(db)
     ck_stats = await queries.get_checks_storage_stats(db)
     now = now_moscow_naive()
@@ -68,12 +78,19 @@ async def build_availability_report_bundle(
         router_checks_truncated=rtc_trunc,
         router_incidents_truncated=ri_trunc,
         router_target_incidents_truncated=rti_trunc,
+        websites=websites,
+        website_module_checks=wm_checks,
+        website_incidents=w_incidents,
+        website_module_incidents=wm_incidents,
+        website_checks_truncated=wmc_trunc,
+        website_incidents_truncated=wi_trunc,
+        website_module_incidents_truncated=wmi_trunc,
     )
     fn = f"botping_{period_start.strftime('%Y%m%d')}_{period_end.strftime('%Y%m%d')}.xlsx"
     cap = (
         f"Период: {period_start.strftime('%d.%m.%Y')} — {period_end.strftime('%d.%m.%Y')}. "
-        f"Проверок ботов: {len(checks)}, LAN: {len(rt_checks)}, инцидентов: "
-        f"{len(incidents) + len(r_incidents) + len(rt_incidents)}."
+        f"Проверок ботов: {len(checks)}, LAN: {len(rt_checks)}, модулей: {len(wm_checks)}, "
+        f"инцидентов: {len(incidents) + len(r_incidents) + len(rt_incidents) + len(w_incidents) + len(wm_incidents)}."
     )
     if c_trunc or i_trunc or a_trunc:
         cap += " Часть строк обрезана по лимиту экспорта — см. лист «Сводка»."

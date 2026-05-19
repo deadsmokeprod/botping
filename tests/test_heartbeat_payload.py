@@ -15,6 +15,7 @@ class TestHeartbeatPayload(unittest.TestCase):
         self.assertEqual(len(p.events), 1)
         self.assertEqual(p.events[0].event_type, "internet_lte")
         self.assertEqual(p.checks, [])
+        self.assertIsNone(p.site)
 
     def test_checks_and_events(self) -> None:
         body = json.dumps(
