@@ -30,7 +30,9 @@ async def _run_telegram_api_probe(
     timeout: float,
     repeat_sec: int,
     quiet_down: bool,
-) -> None:
+    fail_threshold: int,
+    consecutive_failures: int,
+) -> int:
     res = await probe_getme_api(http_client, admin_bot_token, timeout)
     ok = res.bot_alive is True and res.telegram_reachable
     await queries.insert_telegram_check(
@@ -39,17 +41,18 @@ async def _run_telegram_api_probe(
 
     if res.rate_limited:
         logger.warning("Telegram API probe rate limited")
-        return
+        return consecutive_failures
 
     open_inc = await queries.get_open_telegram_incident(db)
     if ok:
         if open_inc:
             await queries.close_telegram_incident(db, int(open_inc["id"]))
             await notify("Восстановлено: Telegram API снова доступен (getMe ok).")
-        return
+        return 0
 
     err = res.error_text or "telegram_unreachable"
     if open_inc:
+        consecutive_failures = max(consecutive_failures, fail_threshold)
         iid = int(open_inc["id"])
         await queries.update_telegram_incident_error(db, iid, err)
         last_alert = _parse_sqlite_ts(str(open_inc["last_alert_at"]))
@@ -59,14 +62,26 @@ async def _run_telegram_api_probe(
             if not quiet_down:
                 await notify(f"Telegram API всё ещё недоступен. Ошибка: {err}")
             await queries.touch_telegram_incident_alert(db, iid)
+        return consecutive_failures
+
+    consecutive_failures += 1
+    if consecutive_failures < fail_threshold:
+        logger.debug(
+            "Telegram API probe failed (%s/%s): %s",
+            consecutive_failures,
+            fail_threshold,
+            err,
+        )
+        return consecutive_failures
+
+    iid = await queries.open_telegram_incident(db, err)
+    if not quiet_down:
+        await notify(f"Telegram API недоступен. Ошибка: {err}")
     else:
-        iid = await queries.open_telegram_incident(db, err)
-        if not quiet_down:
-            await notify(f"Telegram API недоступен. Ошибка: {err}")
-        else:
-            logger.info(
-                "Telegram API incident opened during quiet hours, alert suppressed"
-            )
+        logger.info(
+            "Telegram API incident opened during quiet hours, alert suppressed"
+        )
+    return consecutive_failures
 
 
 def _heartbeat_age_sec(bot: dict) -> int | None:
@@ -89,6 +104,7 @@ async def scheduler_loop(
     consecutive_targets: dict[int, int] = {}
     consecutive_websites: dict[int, int] = {}
     consecutive_modules: dict[int, int] = {}
+    consecutive_tg_api = 0
 
     while not stop.is_set():
         try:
@@ -104,9 +120,16 @@ async def scheduler_loop(
 
             if tg_probe_on and admin_bot_token:
                 try:
-                    await _run_telegram_api_probe(
-                        db, http_client, notify, admin_bot_token,
-                        timeout, repeat_sec, quiet_down,
+                    consecutive_tg_api = await _run_telegram_api_probe(
+                        db,
+                        http_client,
+                        notify,
+                        admin_bot_token,
+                        timeout,
+                        repeat_sec,
+                        quiet_down,
+                        fail_threshold,
+                        consecutive_tg_api,
                     )
                 except Exception:
                     logger.exception("telegram api probe failed")
