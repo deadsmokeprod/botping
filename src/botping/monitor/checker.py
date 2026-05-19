@@ -28,6 +28,28 @@ class ProbeResult:
     http_status: int | None
     error_text: str | None
     rate_limited: bool
+    retry_after_sec: int | None = None
+
+
+def _parse_retry_after(resp: httpx.Response, data: dict | None) -> int:
+    retry: int | None = None
+    if data:
+        params = data.get("parameters")
+        if isinstance(params, dict) and params.get("retry_after") is not None:
+            try:
+                retry = int(params["retry_after"])
+            except (TypeError, ValueError):
+                retry = None
+    if retry is None:
+        header = resp.headers.get("Retry-After")
+        if header:
+            try:
+                retry = int(header)
+            except ValueError:
+                retry = None
+    if retry is None:
+        retry = 60
+    return max(1, min(retry, 600))
 
 
 def _parse_json(resp: httpx.Response) -> dict | None:
@@ -68,7 +90,15 @@ async def probe_getme_api(
 
     if status == 429 or (data is not None and data.get("error_code") == 429):
         err = (data or {}).get("description") or "rate_limited"
-        return ProbeResult(None, True, ms, status, str(err), True)
+        return ProbeResult(
+            None,
+            True,
+            ms,
+            status,
+            str(err),
+            True,
+            retry_after_sec=_parse_retry_after(resp, data),
+        )
 
     if data is None:
         return ProbeResult(None, False, ms, status, "invalid_json", False)

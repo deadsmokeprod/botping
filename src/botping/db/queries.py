@@ -22,6 +22,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "disk_usage_threshold_pct": "80",
     "disk_check_interval_sec": "300",
     "telegram_api_probe_enabled": "1",
+    "telegram_api_check_interval_sec": "300",
     "heartbeat_timeout_sec": "120",
     "heartbeat_port": "8080",
     "heartbeat_unauth_rate_per_min": "10",
@@ -667,6 +668,9 @@ def parse_settings_row(settings: dict[str, str]) -> dict[str, Any]:
     out["disk_check_interval_sec"] = max(60, int(settings.get("disk_check_interval_sec", "300")))
     tp = (settings.get("telegram_api_probe_enabled") or "1").strip()
     out["telegram_api_probe_enabled"] = tp == "1"
+    out["telegram_api_check_interval_sec"] = max(
+        60, int(settings.get("telegram_api_check_interval_sec", "300"))
+    )
     out["heartbeat_timeout_sec"] = max(30, int(settings.get("heartbeat_timeout_sec", "120")))
     out["heartbeat_port"] = max(1, min(65535, int(settings.get("heartbeat_port", "8080"))))
     out["heartbeat_unauth_rate_per_min"] = max(
