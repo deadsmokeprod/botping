@@ -6,7 +6,7 @@ from aiogram.types import CallbackQuery, Message
 
 from botping.bot import keyboards as kb
 from botping.bot import panel_screens as screens
-from botping.bot.panel import render_panel_message, set_current_screen
+from botping.bot.panel import render_panel_message
 from botping.bot.states import RenameNameStates
 from botping.db import queries
 from botping.db.pool import Database
@@ -78,7 +78,7 @@ def register_names_handlers(router: Router) -> None:
         data = await state.get_data()
         return_screen = str(data.get("names_return_screen") or "names_menu")
         await state.set_state(None)
-        await screens.goto_screen_cq(cq, state, db, return_screen, push=False)
+        await screens.goto_screen_cq(cq, state, db, return_screen, push=False, pop=1)
         await cq.answer()
 
     @router.message(RenameNameStates.waiting_value, F.text)
@@ -121,12 +121,11 @@ def register_names_handlers(router: Router) -> None:
 
         await _apply_display_name(db, kind, entity_id, name)
         await state.set_state(None)
-        await set_current_screen(state, return_screen)
-        text, markup = await screens.render_screen(return_screen, db)
-        await render_panel_message(
+        await screens.goto_screen_message(
             message,
             state,
             db,
-            f"✅ Сохранено: <b>{name}</b>\n\n{text}",
-            reply_markup=markup,
+            return_screen,
+            push=False,
+            pop=1,
         )

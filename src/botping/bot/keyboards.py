@@ -38,6 +38,15 @@ def back_to_main_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def help_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=ui.BTN_MAIN, callback_data="menu:main")],
+            _back_row(),
+        ]
+    )
+
+
 def cancel_input_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -49,7 +58,7 @@ def cancel_input_keyboard() -> InlineKeyboardMarkup:
 def setting_input_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="menu:settings")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="nav:back")],
         ]
     )
 
@@ -87,10 +96,12 @@ def main_menu() -> InlineKeyboardMarkup:
 
 
 def report_cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Отмена", callback_data="report:cancel")],
-        ]
+    return with_back(
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="report:cancel")],
+            ]
+        )
     )
 
 
@@ -124,10 +135,7 @@ def settings_group_menu(group_id: str) -> InlineKeyboardMarkup:
                 )
             ]
         )
-    rows.append(
-        [InlineKeyboardButton(text="◀️ К группам", callback_data="menu:settings")]
-    )
-    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def entity_settings_menu(kind: str, entity_id: int, override_count: int) -> InlineKeyboardMarkup:
@@ -160,7 +168,7 @@ def entity_settings_menu(kind: str, entity_id: int, override_count: int) -> Inli
                 )
             ]
         )
-    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def entity_settings_group_menu(
@@ -180,15 +188,7 @@ def entity_settings_group_menu(
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="◀️ К настройкам объекта",
-                callback_data=f"eset:home:{kind}:{entity_id}",
-            )
-        ]
-    )
-    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def entity_setting_detail_keyboard(
@@ -211,27 +211,13 @@ def entity_setting_detail_keyboard(
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="◀️ Назад",
-                callback_data=f"eset:grp:{'notify' if key == 'quiet_hours' else 'monitor'}:{kind}:{entity_id}",
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def entity_setting_input_keyboard(kind: str, entity_id: int, key: str) -> InlineKeyboardMarkup:
-    grp = "notify" if key == "quiet_hours" else "monitor"
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="❌ Отмена",
-                    callback_data=f"eset:grp:{grp}:{kind}:{entity_id}",
-                )
-            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="nav:back")],
         ]
     )
 
@@ -245,10 +231,8 @@ def names_category_menu() -> InlineKeyboardMarkup:
                 [InlineKeyboardButton(text="📡 Устройства LAN", callback_data="names:cat:target")],
                 [InlineKeyboardButton(text="🌍 Сайты", callback_data="names:cat:website")],
                 [InlineKeyboardButton(text="📦 Модули сайтов", callback_data="names:cat:module")],
-                [InlineKeyboardButton(text="◀️ К настройкам", callback_data="menu:settings")],
             ]
-        ),
-        show=False,
+        )
     )
 
 
@@ -266,8 +250,7 @@ def names_entity_list(
                 )
             ]
         )
-    rows.append([InlineKeyboardButton(text="◀️ К категориям", callback_data="names:menu")])
-    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def names_cancel_keyboard() -> InlineKeyboardMarkup:
@@ -349,22 +332,24 @@ def sites_menu(router_rows: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup
 
 
 def router_after_create(router_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Устройство (шаг 2)",
-                    callback_data=f"site:target_add:{router_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🌐 К роутеру",
-                    callback_data=f"site:view:{router_id}",
-                )
-            ],
-            [InlineKeyboardButton(text="📋 К списку", callback_data="menu:routers")],
-        ]
+    return with_back(
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="➕ Устройство (шаг 2)",
+                        callback_data=f"site:target_add:{router_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🌐 К роутеру",
+                        callback_data=f"site:view:{router_id}",
+                    )
+                ],
+                [InlineKeyboardButton(text="📋 К списку", callback_data="menu:routers")],
+            ]
+        )
     )
 
 
@@ -509,22 +494,24 @@ def websites_menu(website_rows: list[tuple[int, str]]) -> InlineKeyboardMarkup:
 
 
 def website_after_create(website_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Модуль (шаг 2)",
-                    callback_data=f"web:mod_add:{website_id}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🌍 К сайту",
-                    callback_data=f"web:view:{website_id}",
-                )
-            ],
-            [InlineKeyboardButton(text="📋 К списку", callback_data="menu:websites")],
-        ]
+    return with_back(
+        InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="➕ Модуль (шаг 2)",
+                        callback_data=f"web:mod_add:{website_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="🌍 К сайту",
+                        callback_data=f"web:view:{website_id}",
+                    )
+                ],
+                [InlineKeyboardButton(text="📋 К списку", callback_data="menu:websites")],
+            ]
+        )
     )
 
 

@@ -231,7 +231,7 @@ def register_sites_handlers(router: Router) -> None:
         await queries.delete_monitored_router(db, rid)
         if hb_server is not None:
             hb_server.invalidate_secrets_cache()
-        await screens.goto_screen_cq(cq, state, db, "routers", push=False)
+        await screens.goto_screen_cq(cq, state, db, "routers", push=False, pop=1)
         await cq.answer("✅ Удалён")
 
     @router.callback_query(F.data.startswith("site:target_add:"))

@@ -220,7 +220,7 @@ def register_websites_handlers(router: Router) -> None:
         await queries.delete_monitored_website(db, wid)
         if hb_server is not None:
             hb_server.invalidate_secrets_cache()
-        await screens.goto_screen_cq(cq, state, db, "websites", push=False)
+        await screens.goto_screen_cq(cq, state, db, "websites", push=False, pop=1)
         await cq.answer("✅ Удалён")
 
     @router.callback_query(F.data.startswith("web:mod_add:"))

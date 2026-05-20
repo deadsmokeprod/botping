@@ -10,29 +10,11 @@ from aiogram.types import CallbackQuery, Message
 from botping.bot import keyboards as kb
 from botping.bot import panel_screens as screens
 from botping.bot.panel import render_panel_message
-from botping.bot.settings_help import (
-    ENTITY_KIND_LABELS,
-    META,
-    format_entity_key_change_prompt,
-)
+from botping.bot.settings_help import META
 from botping.bot.states import EntityQuietHoursStates, EntitySettingStates
 from botping.db import queries
 from botping.db.monitor_settings import MONITOR_OVERRIDE_KEYS
 from botping.db.pool import Database
-
-
-def _entity_screen_back(kind: str, entity_id: int) -> str:
-    if kind == "bot":
-        return f"bot:{entity_id}"
-    if kind == "router":
-        return f"router:{entity_id}"
-    if kind == "target":
-        return f"target:{entity_id}"
-    if kind == "website":
-        return f"website:{entity_id}"
-    if kind == "module":
-        return f"webmod:{entity_id}"
-    return "main"
 
 
 async def _entity_row(db: Database, kind: str, entity_id: int) -> dict | None:
@@ -96,7 +78,14 @@ def register_entity_settings_handlers(router: Router) -> None:
             key, kind, eid = parts[2], parts[3], int(parts[4])
             uid = cq.from_user.id if cq.from_user else 0
             await queries.clear_entity_settings_key(db, kind, eid, key, admin_chat_id=uid)
-            await screens.goto_screen_cq(cq, state, db, f"eset:grp:{'notify' if key == 'quiet_hours' else 'monitor'}:{kind}:{eid}", push=False)
+            await screens.goto_screen_cq(
+                cq,
+                state,
+                db,
+                f"eset:grp:{'notify' if key == 'quiet_hours' else 'monitor'}:{kind}:{eid}",
+                push=False,
+                pop=1,
+            )
             await cq.answer("Сброшено к общим")
             return
         if action == "resetall":
@@ -132,13 +121,13 @@ def register_entity_settings_handlers(router: Router) -> None:
         uid = message.from_user.id if message.from_user else 0
         await queries.set_entity_settings_key(db, kind, eid, key, str(int(raw)), admin_chat_id=uid)
         await state.set_state(None)
-        back = _entity_screen_back(kind, eid)
-        await render_panel_message(
+        await screens.goto_screen_message(
             message,
             state,
             db,
-            f"✅ Сохранено для {ENTITY_KIND_LABELS.get(kind, kind)}: <code>{key}</code> = {int(raw)}",
-            reply_markup=kb.entity_settings_menu(kind, eid, await _override_count(db, kind, eid)),
+            f"eset:home:{kind}:{eid}",
+            push=False,
+            pop=1,
         )
 
     @router.message(EntityQuietHoursStates.waiting_json, F.text)
@@ -181,7 +170,7 @@ def register_entity_settings_handlers(router: Router) -> None:
         )
         await state.set_state(None)
         await screens.goto_screen_message(
-            message, state, db, f"eset:home:{kind}:{eid}", push=False
+            message, state, db, f"eset:home:{kind}:{eid}", push=False, pop=1
         )
 
 

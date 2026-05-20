@@ -67,7 +67,7 @@ async def render_screen(
             kb.main_menu(),
         )
     if screen_key == "help":
-        return ui.HELP_TEXT, kb.back_to_main_keyboard()
+        return ui.HELP_TEXT, kb.help_keyboard()
     if screen_key == "settings":
         return ui.SETTINGS_INTRO, kb.settings_menu()
     if screen_key.startswith("setgrp:"):
@@ -494,25 +494,13 @@ async def goto_screen_cq(
     screen_key: str,
     *,
     push: bool = True,
+    pop: int = 0,
     hb_server: HeartbeatServer | None = None,
     failures_args: str | None = None,
 ) -> None:
-    from botping.bot.panel import (
-        KEY_CURRENT_SCREEN,
-        push_nav,
-        render_panel_cq,
-        set_current_screen,
-    )
+    from botping.bot.panel import apply_screen_nav, render_panel_cq
 
-    if push:
-        data = await state.get_data()
-        current = str(data.get(KEY_CURRENT_SCREEN) or "main")
-        if current != screen_key:
-            await push_nav(state, screen_key)
-        else:
-            await set_current_screen(state, screen_key)
-    else:
-        await set_current_screen(state, screen_key)
+    await apply_screen_nav(state, screen_key, push=push, pop=pop)
 
     text, markup = await render_screen(
         screen_key,
@@ -531,25 +519,13 @@ async def goto_screen_message(
     screen_key: str,
     *,
     push: bool = False,
+    pop: int = 0,
     hb_server: HeartbeatServer | None = None,
     failures_args: str | None = None,
 ) -> None:
-    from botping.bot.panel import (
-        KEY_CURRENT_SCREEN,
-        push_nav,
-        render_panel_message,
-        set_current_screen,
-    )
+    from botping.bot.panel import apply_screen_nav, render_panel_message
 
-    if push:
-        data = await state.get_data()
-        current = str(data.get(KEY_CURRENT_SCREEN) or "main")
-        if current != screen_key:
-            await push_nav(state, screen_key)
-        else:
-            await set_current_screen(state, screen_key)
-    else:
-        await set_current_screen(state, screen_key)
+    await apply_screen_nav(state, screen_key, push=push, pop=pop)
 
     text, markup = await render_screen(
         screen_key,

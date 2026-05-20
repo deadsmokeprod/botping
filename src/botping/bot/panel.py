@@ -96,6 +96,55 @@ async def pop_nav(state: FSMContext) -> str:
     return "main"
 
 
+async def pop_nav_n(state: FSMContext, n: int) -> str:
+    """Снимает до n уровней со стека; возвращает экран, на котором оказались."""
+    screen = "main"
+    for _ in range(max(0, n)):
+        screen = await pop_nav(state)
+    return screen
+
+
+async def clear_nav(state: FSMContext) -> None:
+    await state.update_data(**{KEY_NAV_STACK: [], KEY_CURRENT_SCREEN: "main"})
+
+
+async def nav_refresh(state: FSMContext, screen_key: str) -> None:
+    await set_current_screen(state, screen_key)
+
+
+async def nav_forward(state: FSMContext, screen_key: str) -> None:
+    data = await state.get_data()
+    current = str(data.get(KEY_CURRENT_SCREEN) or "main")
+    if current != screen_key:
+        await push_nav(state, screen_key)
+    else:
+        await set_current_screen(state, screen_key)
+
+
+async def nav_up(state: FSMContext, n: int = 1) -> str:
+    """Подняться на n уровней (pop), не меняя целевой экран отображения."""
+    return await pop_nav_n(state, n)
+
+
+async def apply_screen_nav(
+    state: FSMContext,
+    screen_key: str,
+    *,
+    push: bool = True,
+    pop: int = 0,
+) -> None:
+    """Синхронизирует стек перед показом экрана."""
+    if screen_key == "main" and not push:
+        await clear_nav(state)
+        return
+    if pop > 0:
+        await pop_nav_n(state, pop)
+    if push:
+        await nav_forward(state, screen_key)
+    else:
+        await nav_refresh(state, screen_key)
+
+
 async def set_current_screen(state: FSMContext, screen_key: str) -> None:
     await state.update_data(**{KEY_CURRENT_SCREEN: screen_key})
 

@@ -241,7 +241,7 @@ def setup_router() -> Router:
         key = str(data.get("set_key") or "")
         if not key:
             await state.set_state(None)
-            await screens.goto_screen_message(message, state, db, "settings", push=False)
+            await screens.goto_screen_message(message, state, db, "settings", push=False, pop=1)
             return
         raw = (message.text or "").strip()
         if not re.fullmatch(r"-?\d+", raw):
@@ -305,7 +305,7 @@ def setup_router() -> Router:
             db, "quiet_hours", json.dumps(obj, ensure_ascii=False), admin_chat_id=uid
         )
         await state.set_state(None)
-        await screens.goto_screen_message(message, state, db, "settings", push=False)
+        await screens.goto_screen_message(message, state, db, "settings", push=False, pop=1)
 
     @router.callback_query(F.data.startswith("bot:view:"))
     async def on_bot_view(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
@@ -394,7 +394,7 @@ def setup_router() -> Router:
     async def on_bot_del(cq: CallbackQuery, state: FSMContext, db: Database) -> None:
         bid = int(cq.data.split(":")[2])
         await queries.delete_monitored_bot(db, bid)
-        await screens.goto_screen_cq(cq, state, db, "bots", push=False)
+        await screens.goto_screen_cq(cq, state, db, "bots", push=False, pop=1)
         await cq.answer("✅ Удалён")
 
     @router.callback_query(F.data == "bot:add")
