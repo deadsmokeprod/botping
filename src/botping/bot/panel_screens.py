@@ -358,8 +358,7 @@ async def _render_router_detail(db: Database, rid: int) -> tuple[str, InlineKeyb
     r = await queries.get_monitored_router(db, rid)
     assert r is not None
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
-    target_btns = await target_buttons_for_router(db, rid, hb_timeout)
+    target_btns = await target_buttons_for_router(db, rid, settings)
     ov = queries.count_override_keys(r.get("settings_override"))
     return text, kb.router_detail(rid, bool(r["enabled"]), target_btns, ov)
 
@@ -371,8 +370,7 @@ async def _render_website_detail(db: Database, wid: int) -> tuple[str, InlineKey
     w = await queries.get_monitored_website(db, wid)
     assert w is not None
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
-    mod_btns = await module_buttons_for_website(db, wid, hb_timeout)
+    mod_btns = await module_buttons_for_website(db, wid, settings)
     return text, kb.website_detail(wid, bool(w["enabled"]), mod_btns)
 
 

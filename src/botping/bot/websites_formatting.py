@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from botping.bot.common import format_age_ru, heartbeat_age_sec, mask_secret
+from botping.bot.common import effective_hb_timeout_sec, format_age_ru, heartbeat_age_sec, mask_secret
 from botping.db import queries
 from botping.db.pool import Database
 from botping.monitor.website_monitor import _module_alive
@@ -51,12 +51,15 @@ def site_check_line(w: dict, hb_timeout: int) -> str:
     return f"🟢 сайт{f', {ms} ms' if ms is not None else ''}"
 
 
-async def website_summary_label(db: Database, w: dict, hb_timeout: int) -> str:
+async def website_summary_label(
+    db: Database, w: dict, global_settings: dict
+) -> str:
     wid = int(w["id"])
+    w_hb = effective_hb_timeout_sec(global_settings, w)
     age = heartbeat_age_sec(w)
     if age is None:
         w_st = "⚪"
-    elif age <= hb_timeout:
+    elif age <= w_hb:
         w_st = "🟢"
     else:
         w_st = "🔴"
@@ -66,7 +69,11 @@ async def website_summary_label(db: Database, w: dict, hb_timeout: int) -> str:
     if not modules:
         ok_s = "0 мод."
     else:
-        ok_n = sum(1 for m in modules if _module_alive(m, hb_timeout)[0])
+        ok_n = sum(
+            1
+            for m in modules
+            if _module_alive(m, effective_hb_timeout_sec(global_settings, m))[0]
+        )
         ok_s = f"{ok_n}/{len(modules)}"
     name = str(w["display_name"])[:24]
     host = str(w["host"])[:20]
@@ -75,11 +82,10 @@ async def website_summary_label(db: Database, w: dict, hb_timeout: int) -> str:
 
 async def build_website_menu_rows(db: Database) -> list[tuple[int, str]]:
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
     rows = await queries.list_monitored_websites(db)
     out: list[tuple[int, str]] = []
     for w in rows:
-        out.append((int(w["id"]), await website_summary_label(db, w, hb_timeout)))
+        out.append((int(w["id"]), await website_summary_label(db, w, settings)))
     return out
 
 
@@ -88,11 +94,11 @@ async def format_website_detail(db: Database, website_id: int) -> str | None:
     if not w:
         return None
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
+    w_hb = effective_hb_timeout_sec(settings, w)
     age = heartbeat_age_sec(w)
     if age is None:
         hb_state = "⚪ нет heartbeat"
-    elif age <= hb_timeout:
+    elif age <= w_hb:
         hb_state = f"🟢 жив, {format_age_ru(age)} назад"
     else:
         hb_state = f"🔴 недоступен, {format_age_ru(age)} без пинга"
@@ -103,7 +109,9 @@ async def format_website_detail(db: Database, website_id: int) -> str | None:
         f"💓 {hb_state}",
         f"🔗 Домен: <code>{w['host']}</code>",
         f"🌐 IP: {w.get('last_resolved_ip') or '—'}",
-        site_check_line(w, hb_timeout),
+        site_check_line(w, w_hb),
+        f"⏱ Таймаут: {w_hb} с"
+        + (" (свои)" if queries.count_override_keys(w.get("settings_override")) else " (общие)"),
         f"🕑 Пинг: {w.get('last_heartbeat_at') or '—'}",
         f"📡 Агент: {w.get('last_heartbeat_ip') or '—'}",
         f"🔑 Секрет: {mask_secret(str(w['heartbeat_secret']))}",
@@ -118,7 +126,8 @@ async def format_website_detail(db: Database, website_id: int) -> str | None:
             mid = int(m["id"])
             inc = await queries.get_open_website_module_incident(db, mid)
             inc_s = " 🚨" if inc else ""
-            st = module_status_line(m, hb_timeout)
+            m_hb = effective_hb_timeout_sec(settings, m)
+            st = module_status_line(m, m_hb)
             hint = m.get("check_hint")
             hint_s = f" · {hint}" if hint else ""
             lines.append(f"• {st} <b>{m['display_name']}</b>{hint_s}{inc_s}")
@@ -126,7 +135,13 @@ async def format_website_detail(db: Database, website_id: int) -> str | None:
 
 
 async def module_buttons_for_website(
-    db: Database, website_id: int, hb_timeout: int
+    db: Database, website_id: int, global_settings: dict
 ) -> list[tuple[int, str]]:
     modules = await queries.list_website_modules(db, website_id)
-    return [(int(m["id"]), module_button_label(m, hb_timeout)) for m in modules]
+    return [
+        (
+            int(m["id"]),
+            module_button_label(m, effective_hb_timeout_sec(global_settings, m)),
+        )
+        for m in modules
+    ]

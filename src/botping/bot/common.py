@@ -3,7 +3,15 @@ from __future__ import annotations
 import os
 from datetime import datetime
 
+from typing import Any
+
+from botping.db import queries
 from botping.timeutil import MOSCOW_TZ
+
+
+def effective_hb_timeout_sec(global_settings: dict[str, Any], entity_row: dict[str, Any]) -> int:
+    """Таймаут heartbeat для отображения: глобальный + override объекта."""
+    return queries.effective_monitor_for_entity(global_settings, entity_row).heartbeat_timeout_sec
 
 
 def mask_secret(secret: str) -> str:

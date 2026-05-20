@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from botping.bot.common import format_age_ru, heartbeat_age_sec, mask_secret, public_host_from_env
+from botping.bot.common import (
+    effective_hb_timeout_sec,
+    format_age_ru,
+    heartbeat_age_sec,
+    mask_secret,
+    public_host_from_env,
+)
 from botping.db import queries
 from botping.db.pool import Database
 from botping.monitor.router_monitor import _target_alive
@@ -31,12 +37,13 @@ def target_button_label(t: dict, hb_timeout: int) -> str:
     return f"{st} · {name} · {addr}"
 
 
-async def router_summary_label(db: Database, r: dict, hb_timeout: int) -> str:
+async def router_summary_label(db: Database, r: dict, global_settings: dict) -> str:
     rid = int(r["id"])
+    r_hb = effective_hb_timeout_sec(global_settings, r)
     age = heartbeat_age_sec(r)
     if age is None:
         r_st = "⚪"
-    elif age <= hb_timeout:
+    elif age <= r_hb:
         r_st = "🟢"
     else:
         r_st = "🔴"
@@ -46,7 +53,11 @@ async def router_summary_label(db: Database, r: dict, hb_timeout: int) -> str:
     if not targets:
         ok_s = "0 целей"
     else:
-        ok_n = sum(1 for t in targets if _target_alive(t, hb_timeout)[0])
+        ok_n = sum(
+            1
+            for t in targets
+            if _target_alive(t, effective_hb_timeout_sec(global_settings, t))[0]
+        )
         ok_s = f"{ok_n}/{len(targets)}"
     name = str(r["display_name"])[:28]
     return f"{r_st} {name} · {ok_s}"
@@ -54,11 +65,10 @@ async def router_summary_label(db: Database, r: dict, hb_timeout: int) -> str:
 
 async def build_router_menu_rows(db: Database) -> list[tuple[int, str]]:
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
     rows = await queries.list_monitored_routers(db)
     out: list[tuple[int, str]] = []
     for r in rows:
-        out.append((int(r["id"]), await router_summary_label(db, r, hb_timeout)))
+        out.append((int(r["id"]), await router_summary_label(db, r, settings)))
     return out
 
 
@@ -67,11 +77,11 @@ async def format_site_detail(db: Database, router_id: int) -> str | None:
     if not r:
         return None
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
+    r_hb = effective_hb_timeout_sec(settings, r)
     age = heartbeat_age_sec(r)
     if age is None:
         hb_state = "⚪ нет heartbeat"
-    elif age <= hb_timeout:
+    elif age <= r_hb:
         hb_state = f"🟢 жив, {format_age_ru(age)} назад"
     else:
         hb_state = f"🔴 недоступен, {format_age_ru(age)} без пинга"
@@ -105,18 +115,25 @@ async def format_site_detail(db: Database, router_id: int) -> str | None:
             inc = await queries.get_open_router_target_incident(db, tid)
             inc_s = " 🚨" if inc else ""
             st = "✅" if t["enabled"] else "⏸"
+            t_hb = effective_hb_timeout_sec(settings, t)
             lines.append(
                 f"  · [{tid}] {st} {t['display_name']} {t['address']}: "
-                f"{target_status_line(t, hb_timeout)}{inc_s}"
+                f"{target_status_line(t, t_hb)}{inc_s}"
             )
     return "\n".join(lines)
 
 
 async def target_buttons_for_router(
-    db: Database, router_id: int, hb_timeout: int
+    db: Database, router_id: int, global_settings: dict
 ) -> list[tuple[int, str]]:
     targets = await queries.list_router_targets(db, router_id)
-    return [(int(t["id"]), target_button_label(t, hb_timeout)) for t in targets]
+    return [
+        (
+            int(t["id"]),
+            target_button_label(t, effective_hb_timeout_sec(global_settings, t)),
+        )
+        for t in targets
+    ]
 
 
 async def format_event_log(db: Database, router_id: int) -> str | None:

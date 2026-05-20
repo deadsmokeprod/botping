@@ -12,7 +12,7 @@ from botping.monitor.website_monitor import _module_alive
 from botping.router_events import internet_channel_label
 from botping.timeutil import MOSCOW_TZ, now_moscow_naive
 
-from botping.bot.common import format_age_ru, heartbeat_age_sec
+from botping.bot.common import effective_hb_timeout_sec, format_age_ru, heartbeat_age_sec
 
 
 def mask_token(token: str) -> str:
@@ -101,17 +101,20 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
             inc = await queries.get_open_incident(db, int(b["id"]))
             st = "✅ вкл" if b["enabled"] else "⏸ выкл"
             age = heartbeat_age_sec(b)
+            b_hb = effective_hb_timeout_sec(settings, b)
             inc_s = " 🚨 ИНЦИДЕНТ" if inc else ""
             if age is None:
                 state = "⚪ нет пингов"
-            elif age <= hb_timeout:
+            elif age <= b_hb:
                 state = f"🟢 жив, {_fmt_age(age)} назад"
             else:
                 state = f"🔴 недоступен, {_fmt_age(age)} без пинга"
             lines.append(f"• {b['display_name']} ({st}): {state}{inc_s}")
 
     lines.append("")
-    lines.append(f"⏱ Порог пинга: {_fmt_age(hb_timeout)}")
+    lines.append(
+        f"⏱ Порог пинга (глобально): {_fmt_age(hb_timeout)} — у объектов со ✎ свои значения"
+    )
 
     if settings.get("telegram_api_probe_enabled", True):
         if not tg_last:
@@ -154,11 +157,12 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
             rid = int(r["id"])
             st = "✅" if r["enabled"] else "⏸"
             age = heartbeat_age_sec(r)
+            r_hb = effective_hb_timeout_sec(settings, r)
             r_inc = await queries.get_open_router_incident(db, rid)
             inc_s = " 🚨" if r_inc else ""
             if age is None:
                 r_state = "⚪ нет пингов"
-            elif age <= hb_timeout:
+            elif age <= r_hb:
                 r_state = f"🟢 {_fmt_age(age)} назад"
             else:
                 r_state = f"🔴 {_fmt_age(age)} без пинга"
@@ -177,7 +181,8 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
                 tid = int(t["id"])
                 t_inc = await queries.get_open_router_target_incident(db, tid)
                 t_inc_s = " 🚨" if t_inc else ""
-                alive, terr, _ = _target_alive(t, hb_timeout)
+                t_hb = effective_hb_timeout_sec(settings, t)
+                alive, terr, _ = _target_alive(t, t_hb)
                 if alive:
                     ms = t.get("last_latency_ms")
                     t_st = f"🟢 {ms} ms" if ms is not None else "🟢 жив"
@@ -195,11 +200,12 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
             wid = int(w["id"])
             st = "✅" if w["enabled"] else "⏸"
             age = heartbeat_age_sec(w)
+            w_hb = effective_hb_timeout_sec(settings, w)
             w_inc = await queries.get_open_website_incident(db, wid)
             inc_s = " 🚨" if w_inc else ""
             if age is None:
                 w_state = "⚪ нет пингов"
-            elif age <= hb_timeout:
+            elif age <= w_hb:
                 w_state = f"🟢 {_fmt_age(age)} назад"
             else:
                 w_state = f"🔴 {_fmt_age(age)} без пинга"
@@ -214,7 +220,8 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
                 mid = int(m["id"])
                 m_inc = await queries.get_open_website_module_incident(db, mid)
                 m_inc_s = " 🚨" if m_inc else ""
-                alive, merr, _ = _module_alive(m, hb_timeout)
+                m_hb = effective_hb_timeout_sec(settings, m)
+                alive, merr, _ = _module_alive(m, m_hb)
                 if alive:
                     ms = m.get("last_latency_ms")
                     m_st = f"🟢 {ms} ms" if ms is not None else "🟢 жив"
