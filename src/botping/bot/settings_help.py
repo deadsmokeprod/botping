@@ -380,18 +380,35 @@ async def format_entity_key_change_prompt(
 ) -> str:
     global_parsed = await queries.load_all_settings(db)
     override = await queries.get_entity_settings_override(db, kind, entity_id)
-    eff = queries.resolve_monitor_settings(global_parsed, json.dumps(override) if override else None)
+    parent_ov: dict[str, str] = {}
+    parent_row: dict | None = None
+    if kind == "module":
+        mod = await queries.get_website_module(db, entity_id)
+        if mod:
+            parent_row = await queries.get_monitored_website(db, int(mod["website_id"]))
+            if parent_row:
+                parent_ov = await queries.get_entity_settings_override(
+                    db, "website", int(parent_row["id"])
+                )
+    entity_row = {"settings_override": json.dumps(override) if override else None}
+    eff = queries.effective_monitor_for_entity(
+        global_parsed, entity_row, parent_row=parent_row
+    )
     m = META[key]
+    if key in override:
+        src = "своё"
+    elif kind == "module" and key in parent_ov:
+        src = "с сайта"
+    else:
+        src = "общее (глобальное)"
     if key == "quiet_hours":
         cur_disp = _pretty_quiet(json.dumps(eff.quiet_hours, ensure_ascii=False))
         global_raw = await _raw_value(db, key)
         et_disp = _pretty_quiet(global_raw)
-        src = "свои" if key in override else "общие"
     else:
         cur_val = getattr(eff, key, None)
         cur_disp = str(cur_val)
         et_disp = queries.DEFAULT_SETTINGS.get(key, "")
-        src = "своё" if key in override else "общее (глобальное)"
     parts = [
         f"Изменение ({ENTITY_KIND_LABELS.get(kind, kind)} id={entity_id}): {m['title']}",
         "",

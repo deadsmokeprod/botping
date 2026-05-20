@@ -59,6 +59,18 @@ class EffectiveMonitorSettings:
     quiet_hours: dict[str, Any]
 
 
+def resolve_monitor_settings_chain(
+    global_parsed: dict[str, Any],
+    *override_layers: str | None,
+) -> EffectiveMonitorSettings:
+    """Глобальные → слои override (например сайт, затем модуль). Поздний слой перекрывает ранний."""
+    merged_ov: dict[str, str] = {}
+    for raw in override_layers:
+        merged_ov.update(parse_settings_override(raw))
+    payload = json.dumps(merged_ov, ensure_ascii=False) if merged_ov else None
+    return resolve_monitor_settings(global_parsed, payload)
+
+
 def resolve_monitor_settings(
     global_parsed: dict[str, Any],
     override_raw: str | None,

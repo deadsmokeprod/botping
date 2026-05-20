@@ -72,7 +72,7 @@ async def website_summary_label(
         ok_n = sum(
             1
             for m in modules
-            if _module_alive(m, effective_hb_timeout_sec(global_settings, m))[0]
+            if _module_alive(m, effective_hb_timeout_sec(global_settings, m, parent_row=w))[0]
         )
         ok_s = f"{ok_n}/{len(modules)}"
     name = str(w["display_name"])[:24]
@@ -126,7 +126,7 @@ async def format_website_detail(db: Database, website_id: int) -> str | None:
             mid = int(m["id"])
             inc = await queries.get_open_website_module_incident(db, mid)
             inc_s = " 🚨" if inc else ""
-            m_hb = effective_hb_timeout_sec(settings, m)
+            m_hb = effective_hb_timeout_sec(settings, m, parent_row=w)
             st = module_status_line(m, m_hb)
             hint = m.get("check_hint")
             hint_s = f" · {hint}" if hint else ""
@@ -135,13 +135,15 @@ async def format_website_detail(db: Database, website_id: int) -> str | None:
 
 
 async def module_buttons_for_website(
-    db: Database, website_id: int, global_settings: dict
+    db: Database, website_id: int, global_settings: dict, website_row: dict
 ) -> list[tuple[int, str]]:
     modules = await queries.list_website_modules(db, website_id)
     return [
         (
             int(m["id"]),
-            module_button_label(m, effective_hb_timeout_sec(global_settings, m)),
+            module_button_label(
+                m, effective_hb_timeout_sec(global_settings, m, parent_row=website_row)
+            ),
         )
         for m in modules
     ]

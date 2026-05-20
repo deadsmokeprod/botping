@@ -370,7 +370,7 @@ async def _render_website_detail(db: Database, wid: int) -> tuple[str, InlineKey
     w = await queries.get_monitored_website(db, wid)
     assert w is not None
     settings = await queries.load_all_settings(db)
-    mod_btns = await module_buttons_for_website(db, wid, settings)
+    mod_btns = await module_buttons_for_website(db, wid, settings, w)
     return text, kb.website_detail(wid, bool(w["enabled"]), mod_btns)
 
 
@@ -380,7 +380,10 @@ async def _render_webmod_detail(db: Database, mid: int) -> tuple[str, InlineKeyb
         return "❌ Не найдено", kb.back_to_main_keyboard()
     wid = int(m["website_id"])
     settings = await queries.load_all_settings(db)
-    meff = queries.effective_monitor_for_entity(settings, m)
+    parent_w = await queries.get_monitored_website(db, wid)
+    meff = queries.effective_monitor_for_entity(
+        settings, m, parent_row=parent_w
+    )
     en = "✅ вкл" if m["enabled"] else "⏸ выкл"
     hint = m.get("check_hint") or "—"
     ov = queries.count_override_keys(m.get("settings_override"))
@@ -437,7 +440,12 @@ async def _render_entity_settings_screen(
             f"<b>{row}</b> (id={eid})\n\n"
             f"{mode_line}\n"
             "«Глобальные настройки» — дефолты для всех объектов.\n"
-            "«Мониторинг» / «Уведомления» — только для этого объекта."
+            "«Мониторинг» / «Уведомления» — только для этого объекта.\n"
+            + (
+                "У модулей без своих ✎ действуют настройки сайта поверх глобальных."
+                if kind == "website"
+                else ""
+            )
         )
         return text, kb.entity_settings_menu(kind, eid, ov)
     if action == "grp":

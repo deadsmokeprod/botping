@@ -767,10 +767,17 @@ async def load_global_settings_raw(db: Database) -> dict[str, str]:
 def effective_monitor_for_entity(
     global_parsed: dict[str, Any],
     entity_row: dict[str, Any],
+    *,
+    parent_row: dict[str, Any] | None = None,
 ) -> Any:
-    return resolve_monitor_settings(
-        global_parsed, entity_row.get("settings_override")
-    )
+    """Для модулей сайта передайте parent_row = строка сайта — унаследуют его override."""
+    from botping.db.monitor_settings import resolve_monitor_settings_chain
+
+    layers: list[str | None] = []
+    if parent_row is not None:
+        layers.append(parent_row.get("settings_override"))
+    layers.append(entity_row.get("settings_override"))
+    return resolve_monitor_settings_chain(global_parsed, *layers)
 
 
 async def get_entity_settings_override(

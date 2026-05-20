@@ -105,7 +105,7 @@ async def run_website_monitor_tick(
             mid = int(m["id"])
             mname = str(m["display_name"])
             label = f"{label_base} / {mname}"
-            meff = queries.effective_monitor_for_entity(global_settings, m)
+            meff = queries.effective_monitor_for_entity(global_settings, m, parent_row=w)
             mst = monitor_state.get("module", mid)
 
             alive, err_text, lat_ms = _module_alive(m, meff.heartbeat_timeout_sec)

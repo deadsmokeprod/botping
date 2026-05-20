@@ -220,7 +220,7 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
                 mid = int(m["id"])
                 m_inc = await queries.get_open_website_module_incident(db, mid)
                 m_inc_s = " 🚨" if m_inc else ""
-                m_hb = effective_hb_timeout_sec(settings, m)
+                m_hb = effective_hb_timeout_sec(settings, m, parent_row=w)
                 alive, merr, _ = _module_alive(m, m_hb)
                 if alive:
                     ms = m.get("last_latency_ms")
