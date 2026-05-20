@@ -39,3 +39,11 @@ class AddWebsiteModuleStates(StatesGroup):
 
 class RenameNameStates(StatesGroup):
     waiting_value = State()
+
+
+class EntitySettingStates(StatesGroup):
+    waiting_value = State()
+
+
+class EntityQuietHoursStates(StatesGroup):
+    waiting_json = State()

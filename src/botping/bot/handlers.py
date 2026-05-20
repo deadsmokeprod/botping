@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message, ReplyKeyboa
 from botping.bot import keyboards as kb
 from botping.bot.commands import refresh_chat_commands_and_menu
 from botping.bot.formatting import chunk_text, heartbeat_snippet
+from botping.bot.handlers_entity_settings import register_entity_settings_handlers
 from botping.bot.handlers_names import register_names_handlers
 from botping.bot.handlers_sites import register_sites_handlers
 from botping.bot.handlers_websites import register_websites_handlers
@@ -469,6 +470,7 @@ def setup_router() -> Router:
             reply_markup=markup,
         )
 
+    register_entity_settings_handlers(router)
     register_names_handlers(router)
     register_sites_handlers(router)
     register_websites_handlers(router)

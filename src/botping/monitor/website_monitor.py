@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Any
 
 from botping.db import queries
 from botping.db.pool import Database
+from botping.monitor.entity_incident import EntityMonitorState, process_entity_tick
 from botping.monitor.util import NotifyFn, format_age, parse_sqlite_ts
 from botping.timeutil import MOSCOW_TZ
 
@@ -19,28 +21,28 @@ def _ts_age_sec(ts: str | None) -> int | None:
     return max(0, int((now - last).total_seconds()))
 
 
-def _module_alive(m: dict, hb_timeout: int) -> tuple[bool, str | None]:
+def _module_alive(
+    m: dict, hb_timeout: int
+) -> tuple[bool, str | None, int | None]:
     age = _ts_age_sec(m.get("last_ok_at"))
     if age is None:
-        return False, "нет данных от агента"
+        return False, "нет данных от агента", None
     if age > hb_timeout:
-        return False, f"устарели данные {format_age(age)}"
+        return False, f"устарели данные {format_age(age)}", age * 1000
     err = (m.get("last_error") or "").strip()
     if err:
-        return False, err
-    return True, None
+        return False, err, m.get("last_latency_ms")
+    lat = m.get("last_latency_ms")
+    return True, None, int(lat) if lat is not None else age * 1000
 
 
 async def run_website_monitor_tick(
     db: Database,
     notify: NotifyFn,
     *,
-    hb_timeout: int,
-    fail_threshold: int,
-    repeat_sec: int,
-    quiet_down: bool,
-    consecutive_websites: dict[int, int],
-    consecutive_modules: dict[int, int],
+    global_settings: dict[str, Any],
+    global_quiet_down: bool,
+    monitor_state: EntityMonitorState,
 ) -> None:
     websites = await queries.list_monitored_websites(db)
     for w in websites:
@@ -50,48 +52,50 @@ async def run_website_monitor_tick(
         wname = str(w["display_name"])
         host = str(w["host"])
         label_base = f"{wname} ({host})"
-
-        open_w_inc = await queries.get_open_website_incident(db, wid)
-        if open_w_inc:
-            consecutive_websites[wid] = max(consecutive_websites.get(wid, 0), fail_threshold)
+        eff = queries.effective_monitor_for_entity(global_settings, w)
+        st = monitor_state.get("website", wid)
 
         age = _ts_age_sec(w.get("last_heartbeat_at"))
         if age is None:
             website_alive = False
             w_err = "нет ни одного heartbeat"
+            w_lat: int | None = None
         else:
-            website_alive = age <= hb_timeout
+            website_alive = age <= eff.heartbeat_timeout_sec
             w_err = None if website_alive else f"нет heartbeat {format_age(age)}"
+            w_lat = age * 1000
 
-        if website_alive:
-            consecutive_websites[wid] = 0
-            if open_w_inc:
-                await queries.close_website_incident(db, int(open_w_inc["id"]))
-                await notify(
-                    f"Восстановлено: сайт {label_base} (id={wid}). Heartbeat снова приходит."
-                )
-        else:
-            consecutive_websites[wid] = consecutive_websites.get(wid, 0) + 1
-            open_w_inc = await queries.get_open_website_incident(db, wid)
-            if open_w_inc:
-                iid = int(open_w_inc["id"])
-                await queries.update_website_incident_error(db, iid, w_err or "")
-                last_alert = parse_sqlite_ts(str(open_w_inc["last_alert_at"]))
-                now = datetime.now(MOSCOW_TZ)
-                elapsed = (now - last_alert).total_seconds() if last_alert else repeat_sec + 1
-                if elapsed >= repeat_sec and not quiet_down:
-                    await notify(
-                        f"Сайт недоступен: {label_base} (id={wid}). {w_err}. "
-                        "Нет push на Botping."
-                    )
-                if elapsed >= repeat_sec:
-                    await queries.touch_website_incident_alert(db, iid)
-            elif consecutive_websites[wid] >= fail_threshold:
-                await queries.open_website_incident(db, wid, w_err)
-                if not quiet_down:
-                    await notify(f"Сайт недоступен: {label_base} (id={wid}). {w_err}.")
-                else:
-                    logger.info("Website incident during quiet hours: %s", wname)
+        w_slow = (
+            website_alive
+            and eff.slow_ms > 0
+            and w_lat is not None
+            and w_lat > eff.slow_ms
+        )
+
+        async def _get_open() -> dict[str, Any] | None:
+            return await queries.get_open_website_incident(db, wid)
+
+        await process_entity_tick(
+            st,
+            is_down=not website_alive,
+            is_slow=w_slow,
+            latency_ms=w_lat,
+            err_text=w_err,
+            label=f"сайт {label_base} (id={wid})",
+            eff=eff,
+            global_quiet_down=global_quiet_down,
+            notify=notify,
+            get_open_incident=_get_open,
+            open_incident=lambda err: queries.open_website_incident(db, wid, err),
+            close_incident=lambda iid: queries.close_website_incident(db, iid),
+            update_incident_error=lambda iid, err: queries.update_website_incident_error(
+                db, iid, err
+            ),
+            touch_incident_alert=lambda iid: queries.touch_website_incident_alert(db, iid),
+            down_prefix="Сайт недоступен",
+            down_repeat_prefix="Сайт всё ещё недоступен",
+            recover_suffix="Heartbeat снова приходит.",
+        )
 
         if not website_alive:
             continue
@@ -101,14 +105,17 @@ async def run_website_monitor_tick(
             mid = int(m["id"])
             mname = str(m["display_name"])
             label = f"{label_base} / {mname}"
+            meff = queries.effective_monitor_for_entity(global_settings, m)
+            mst = monitor_state.get("module", mid)
 
-            open_m_inc = await queries.get_open_website_module_incident(db, mid)
-            if open_m_inc:
-                consecutive_modules[mid] = max(
-                    consecutive_modules.get(mid, 0), fail_threshold
-                )
+            alive, err_text, lat_ms = _module_alive(m, meff.heartbeat_timeout_sec)
+            is_slow = (
+                alive
+                and meff.slow_ms > 0
+                and lat_ms is not None
+                and lat_ms > meff.slow_ms
+            )
 
-            alive, err_text = _module_alive(m, hb_timeout)
             await queries.insert_website_module_check(
                 db,
                 mid,
@@ -118,31 +125,28 @@ async def run_website_monitor_tick(
                 check_type="heartbeat_eval",
             )
 
-            if alive:
-                consecutive_modules[mid] = 0
-                if open_m_inc:
-                    await queries.close_website_module_incident(db, int(open_m_inc["id"]))
-                    await notify(f"Восстановлено: {label}")
-            else:
-                consecutive_modules[mid] = consecutive_modules.get(mid, 0) + 1
-                open_m_inc = await queries.get_open_website_module_incident(db, mid)
-                if open_m_inc:
-                    iid = int(open_m_inc["id"])
-                    await queries.update_website_module_incident_error(
-                        db, iid, err_text or ""
-                    )
-                    last_alert = parse_sqlite_ts(str(open_m_inc["last_alert_at"]))
-                    now = datetime.now(MOSCOW_TZ)
-                    elapsed = (
-                        (now - last_alert).total_seconds() if last_alert else repeat_sec + 1
-                    )
-                    if elapsed >= repeat_sec and not quiet_down:
-                        await notify(f"Всё ещё недоступен: {label}. {err_text}")
-                    if elapsed >= repeat_sec:
-                        await queries.touch_website_module_incident_alert(db, iid)
-                elif consecutive_modules[mid] >= fail_threshold:
-                    await queries.open_website_module_incident(db, mid, err_text)
-                    if not quiet_down:
-                        await notify(f"Недоступен: {label}. {err_text}")
-                    else:
-                        logger.info("Website module incident during quiet hours: %s", label)
+            async def _get_m_open(mid: int = mid) -> dict[str, Any] | None:
+                return await queries.get_open_website_module_incident(db, mid)
+
+            await process_entity_tick(
+                mst,
+                is_down=not alive,
+                is_slow=is_slow,
+                latency_ms=lat_ms,
+                err_text=err_text,
+                label=label,
+                eff=meff,
+                global_quiet_down=global_quiet_down,
+                notify=notify,
+                get_open_incident=_get_m_open,
+                open_incident=lambda err, mid=mid: queries.open_website_module_incident(
+                    db, mid, err
+                ),
+                close_incident=lambda iid: queries.close_website_module_incident(db, iid),
+                update_incident_error=lambda iid, err: queries.update_website_module_incident_error(
+                    db, iid, err
+                ),
+                touch_incident_alert=lambda iid: queries.touch_website_module_incident_alert(
+                    db, iid
+                ),
+            )

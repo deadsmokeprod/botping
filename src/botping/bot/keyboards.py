@@ -3,6 +3,13 @@ from __future__ import annotations
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from botping.bot import copy as ui
+from botping.bot.settings_help import (
+    ENTITY_SETTINGS_GROUPS,
+    META,
+    SETTINGS_GROUP_KEYS,
+    SETTINGS_GROUPS,
+    setting_button_label,
+)
 
 
 def _back_row() -> list[InlineKeyboardButton]:
@@ -88,79 +95,145 @@ def report_cancel_keyboard() -> InlineKeyboardMarkup:
 
 
 def settings_menu() -> InlineKeyboardMarkup:
-    return with_back(
-        InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🏷 Наименования", callback_data="names:menu")],
-                [InlineKeyboardButton(text="⏱ Интервал проверки (с)", callback_data="set:check_interval_sec")],
-                [InlineKeyboardButton(text="⏳ Таймаут запроса (с)", callback_data="set:request_timeout_sec")],
-                [InlineKeyboardButton(text="📉 Порог падений", callback_data="set:fail_threshold")],
-                [
-                    InlineKeyboardButton(
-                        text="🔔 Повтор алерта (с)",
-                        callback_data="set:repeat_alert_interval_sec",
-                    )
-                ],
-                [InlineKeyboardButton(text="🐢 Медленный ответ (мс)", callback_data="set:slow_ms")],
-                [
-                    InlineKeyboardButton(
-                        text="📅 Excel 00:00 МСК (0/1)",
-                        callback_data="set:daily_excel_report_enabled",
-                    )
-                ],
-                [InlineKeyboardButton(text="🌙 Тихие часы (JSON)", callback_data="set:quiet_hours")],
-                [
-                    InlineKeyboardButton(
-                        text="💓 Таймаут heartbeat (с)",
-                        callback_data="set:heartbeat_timeout_sec",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="🚫 Лимит чужих запросов/мин",
-                        callback_data="set:heartbeat_unauth_rate_per_min",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="🔒 Порог бана",
-                        callback_data="set:heartbeat_ban_fails_threshold",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="⏰ Длительность бана (мин)",
-                        callback_data="set:heartbeat_ban_duration_min",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="☁️ Проверка Telegram API",
-                        callback_data="set:telegram_api_probe_enabled",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="☁️ Интервал getMe (с)",
-                        callback_data="set:telegram_api_check_interval_sec",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="☁️ Порог сбоев Telegram",
-                        callback_data="set:telegram_api_fail_threshold",
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text="☁️ Задержка алерта Telegram (с)",
-                        callback_data="set:telegram_api_down_alert_sec",
-                    )
-                ],
-                [InlineKeyboardButton(text="💾 Порог диска (%)", callback_data="set:disk_usage_threshold_pct")],
-                [InlineKeyboardButton(text="🔄 Интервал диска (с)", callback_data="set:disk_check_interval_sec")],
+    rows: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="🏷 Наименования", callback_data="names:menu")],
+    ]
+    for gid, g in SETTINGS_GROUPS.items():
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{g['emoji']} {g['title']}",
+                    callback_data=f"setgrp:{gid}",
+                )
             ]
         )
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+def settings_group_menu(group_id: str) -> InlineKeyboardMarkup:
+    keys = SETTINGS_GROUP_KEYS.get(group_id, [])
+    rows: list[list[InlineKeyboardButton]] = []
+    for key in keys:
+        if key not in META:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=setting_button_label(key),
+                    callback_data=f"set:{key}",
+                )
+            ]
+        )
+    rows.append(
+        [InlineKeyboardButton(text="◀️ К группам", callback_data="menu:settings")]
+    )
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+
+
+def entity_settings_menu(kind: str, entity_id: int, override_count: int) -> InlineKeyboardMarkup:
+    hint = f"Свои: {override_count}" if override_count else "Общие настройки"
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text=f"⚙️ {hint}",
+                callback_data=f"eset:home:{kind}:{entity_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📡 Мониторинг и алерты",
+                callback_data=f"eset:grp:monitor:{kind}:{entity_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔔 Уведомления",
+                callback_data=f"eset:grp:notify:{kind}:{entity_id}",
+            )
+        ],
+    ]
+    if override_count:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="↩️ Сбросить все к общим",
+                    callback_data=f"eset:resetall:{kind}:{entity_id}",
+                )
+            ]
+        )
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+
+
+def entity_settings_group_menu(
+    kind: str, entity_id: int, group_id: str, overridden: set[str]
+) -> InlineKeyboardMarkup:
+    keys = ENTITY_SETTINGS_GROUPS.get(group_id, [])
+    rows: list[list[InlineKeyboardButton]] = []
+    for key in keys:
+        if key not in META:
+            continue
+        mark = "✎ " if key in overridden else ""
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{mark}{setting_button_label(key)}",
+                    callback_data=f"eset:key:{key}:{kind}:{entity_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="◀️ К настройкам объекта",
+                callback_data=f"eset:home:{kind}:{entity_id}",
+            )
+        ]
+    )
+    return with_back(InlineKeyboardMarkup(inline_keyboard=rows), show=False)
+
+
+def entity_setting_detail_keyboard(
+    kind: str, entity_id: int, key: str, is_overridden: bool
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                text="✏️ Изменить",
+                callback_data=f"eset:edit:{key}:{kind}:{entity_id}",
+            )
+        ],
+    ]
+    if is_overridden:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="↩️ Сбросить этот параметр",
+                    callback_data=f"eset:resetkey:{key}:{kind}:{entity_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад",
+                callback_data=f"eset:grp:{'notify' if key == 'quiet_hours' else 'monitor'}:{kind}:{entity_id}",
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def entity_setting_input_keyboard(kind: str, entity_id: int, key: str) -> InlineKeyboardMarkup:
+    grp = "notify" if key == "quiet_hours" else "monitor"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="❌ Отмена",
+                    callback_data=f"eset:grp:{grp}:{kind}:{entity_id}",
+                )
+            ],
+        ]
     )
 
 
@@ -222,11 +295,17 @@ def bots_menu(bot_rows: list[tuple[int, str, bool]]) -> InlineKeyboardMarkup:
     return with_back(InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-def bot_detail(bot_id: int, enabled: bool) -> InlineKeyboardMarkup:
+def bot_detail(bot_id: int, enabled: bool, override_count: int = 0) -> InlineKeyboardMarkup:
     toggle = "⏸ Выключить" if enabled else "✅ Включить"
     return with_back(
         InlineKeyboardMarkup(
             inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⚙️ Настройки",
+                        callback_data=f"eset:home:bot:{bot_id}",
+                    )
+                ],
                 [InlineKeyboardButton(text="📋 Сниппет", callback_data=f"bot:snippet:{bot_id}")],
                 [
                     InlineKeyboardButton(text="🔑 Секрет", callback_data=f"bot:secret:{bot_id}"),
@@ -311,6 +390,7 @@ def router_detail(
     router_id: int,
     enabled: bool,
     target_buttons: list[tuple[int, str]],
+    override_count: int = 0,
 ) -> InlineKeyboardMarkup:
     toggle = "⏸ Выключить" if enabled else "✅ Включить"
     rows: list[list[InlineKeyboardButton]] = []
@@ -328,6 +408,14 @@ def router_detail(
             InlineKeyboardButton(
                 text="➕ Устройство в LAN",
                 callback_data=f"site:target_add:{router_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="⚙️ Настройки",
+                callback_data=f"eset:home:router:{router_id}",
             )
         ]
     )
@@ -371,6 +459,12 @@ def site_target_detail(target_id: int, router_id: int, enabled: bool) -> InlineK
     return with_back(
         InlineKeyboardMarkup(
             inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⚙️ Настройки",
+                        callback_data=f"eset:home:target:{target_id}",
+                    )
+                ],
                 [InlineKeyboardButton(text=toggle, callback_data=f"site:ttoggle:{target_id}")],
                 [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"site:tdelask:{target_id}")],
             ]
@@ -462,6 +556,14 @@ def website_detail(
     rows.append(
         [
             InlineKeyboardButton(
+                text="⚙️ Настройки",
+                callback_data=f"eset:home:website:{website_id}",
+            )
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
                 text="🔧 Установка агента",
                 callback_data=f"web:setup:{website_id}",
             )
@@ -483,6 +585,12 @@ def website_module_detail(module_id: int, enabled: bool) -> InlineKeyboardMarkup
     return with_back(
         InlineKeyboardMarkup(
             inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⚙️ Настройки",
+                        callback_data=f"eset:home:module:{module_id}",
+                    )
+                ],
                 [InlineKeyboardButton(text=toggle, callback_data=f"web:mtoggle:{module_id}")],
                 [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"web:mdelask:{module_id}")],
             ]

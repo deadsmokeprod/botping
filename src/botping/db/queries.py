@@ -5,6 +5,12 @@ from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
+from botping.db.monitor_settings import (
+    MONITOR_OVERRIDE_KEYS,
+    entity_table,
+    parse_settings_override,
+    resolve_monitor_settings,
+)
 from botping.router_events import ROUTER_EVENT_DEDUP_SEC, format_router_event_message
 from botping.timeutil import MOSCOW_TZ, now_moscow_iso
 
@@ -15,6 +21,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "check_interval_sec": "60",
     "request_timeout_sec": "15",
     "fail_threshold": "2",
+    "recover_threshold": "2",
+    "down_alert_sec": "0",
     "repeat_alert_interval_sec": "3600",
     "slow_ms": "0",
     "quiet_hours": "{}",
@@ -67,7 +75,7 @@ async def set_setting(db: Database, key: str, value: str, admin_chat_id: int | N
 
 _BOT_COLUMNS = (
     "id, display_name, token, enabled, created_at, "
-    "heartbeat_secret, last_heartbeat_at, last_heartbeat_ip"
+    "heartbeat_secret, last_heartbeat_at, last_heartbeat_ip, settings_override"
 )
 
 
@@ -81,6 +89,7 @@ def _row_to_bot(r: Any) -> dict[str, Any]:
         "heartbeat_secret": r[5] or "",
         "last_heartbeat_at": r[6],
         "last_heartbeat_ip": r[7],
+        "settings_override": r[8] if len(r) > 8 else None,
     }
 
 
@@ -700,6 +709,8 @@ def parse_settings_row(settings: dict[str, str]) -> dict[str, Any]:
     out["check_interval_sec"] = max(5, int(settings.get("check_interval_sec", "60")))
     out["request_timeout_sec"] = max(1, int(settings.get("request_timeout_sec", "15")))
     out["fail_threshold"] = max(1, int(settings.get("fail_threshold", "2")))
+    out["recover_threshold"] = max(1, int(settings.get("recover_threshold", "2")))
+    out["down_alert_sec"] = max(0, int(settings.get("down_alert_sec", "0")))
     out["repeat_alert_interval_sec"] = max(60, int(settings.get("repeat_alert_interval_sec", "3600")))
     out["slow_ms"] = max(0, int(settings.get("slow_ms", "0")))
     qh = settings.get("quiet_hours", "{}")
@@ -746,16 +757,127 @@ async def load_all_settings(db: Database) -> dict[str, Any]:
     return parse_settings_row(merged)
 
 
+async def load_global_settings_raw(db: Database) -> dict[str, str]:
+    rows = await db.fetchall("SELECT key, value FROM settings")
+    merged = dict(DEFAULT_SETTINGS)
+    merged.update({str(r[0]): str(r[1]) for r in rows})
+    return merged
+
+
+def effective_monitor_for_entity(
+    global_parsed: dict[str, Any],
+    entity_row: dict[str, Any],
+) -> Any:
+    return resolve_monitor_settings(
+        global_parsed, entity_row.get("settings_override")
+    )
+
+
+async def get_entity_settings_override(
+    db: Database, kind: str, entity_id: int
+) -> dict[str, str]:
+    table, id_col = entity_table(kind)
+    row = await db.fetchone(
+        f"SELECT settings_override FROM {table} WHERE {id_col} = ?",
+        (entity_id,),
+    )
+    if not row:
+        return {}
+    return parse_settings_override(row[0])
+
+
+async def set_entity_settings_key(
+    db: Database,
+    kind: str,
+    entity_id: int,
+    key: str,
+    value: str,
+    admin_chat_id: int | None = None,
+) -> None:
+    if key not in MONITOR_OVERRIDE_KEYS:
+        raise ValueError(f"invalid override key: {key}")
+    current = await get_entity_settings_override(db, kind, entity_id)
+    old = current.get(key)
+    current[key] = value
+    await _write_entity_override(db, kind, entity_id, current, key, old, value, admin_chat_id)
+
+
+async def clear_entity_settings_key(
+    db: Database,
+    kind: str,
+    entity_id: int,
+    key: str,
+    admin_chat_id: int | None = None,
+) -> None:
+    current = await get_entity_settings_override(db, kind, entity_id)
+    old = current.pop(key, None)
+    await _write_entity_override(db, kind, entity_id, current, key, old, None, admin_chat_id)
+
+
+async def clear_entity_settings_all(
+    db: Database,
+    kind: str,
+    entity_id: int,
+    admin_chat_id: int | None = None,
+) -> None:
+    old_raw = await get_entity_settings_override(db, kind, entity_id)
+    table, id_col = entity_table(kind)
+    await db.execute(
+        f"UPDATE {table} SET settings_override = NULL WHERE {id_col} = ?",
+        (entity_id,),
+    )
+    if admin_chat_id is not None and old_raw:
+        audit_key = f"{kind}:{entity_id}:settings_override"
+        await db.execute(
+            "INSERT INTO settings_audit (ts, admin_chat_id, key, old_value, new_value) VALUES (?, ?, ?, ?, ?)",
+            (
+                now_moscow_iso(),
+                admin_chat_id,
+                audit_key,
+                json.dumps(old_raw, ensure_ascii=False),
+                None,
+            ),
+        )
+
+
+async def _write_entity_override(
+    db: Database,
+    kind: str,
+    entity_id: int,
+    current: dict[str, str],
+    key: str,
+    old: str | None,
+    new: str | None,
+    admin_chat_id: int | None,
+) -> None:
+    table, id_col = entity_table(kind)
+    payload = json.dumps(current, ensure_ascii=False) if current else None
+    await db.execute(
+        f"UPDATE {table} SET settings_override = ? WHERE {id_col} = ?",
+        (payload, entity_id),
+    )
+    if admin_chat_id is not None and old != new:
+        audit_key = f"{kind}:{entity_id}:{key}"
+        await db.execute(
+            "INSERT INTO settings_audit (ts, admin_chat_id, key, old_value, new_value) VALUES (?, ?, ?, ?, ?)",
+            (now_moscow_iso(), admin_chat_id, audit_key, old, new),
+        )
+
+
+def count_override_keys(raw: str | None) -> int:
+    return len(parse_settings_override(raw))
+
+
 # ── Monitored routers / LAN targets ───────────────────────────────────
 
 _ROUTER_COLUMNS = (
     "id, display_name, enabled, created_at, "
-    "heartbeat_secret, last_heartbeat_at, last_heartbeat_ip"
+    "heartbeat_secret, last_heartbeat_at, last_heartbeat_ip, settings_override"
 )
 
 _TARGET_COLUMNS = (
     "id, router_id, display_name, address, enabled, "
-    "last_ok_at, last_latency_ms, last_error"
+    "last_ok_at, last_latency_ms, last_error, settings_override"
 )
 
 
@@ -768,6 +890,7 @@ def _row_to_router(r: Any) -> dict[str, Any]:
         "heartbeat_secret": r[4] or "",
         "last_heartbeat_at": r[5],
         "last_heartbeat_ip": r[6],
+        "settings_override": r[7] if len(r) > 7 else None,
     }
 
 
@@ -781,6 +904,7 @@ def _row_to_target(r: Any) -> dict[str, Any]:
         "last_ok_at": r[5],
         "last_latency_ms": r[6],
         "last_error": r[7],
+        "settings_override": r[8] if len(r) > 8 else None,
     }
 
 
@@ -1226,12 +1350,12 @@ async def list_all_incidents_in_range(
 _WEBSITE_COLUMNS = (
     "id, display_name, host, enabled, created_at, heartbeat_secret, "
     "last_heartbeat_at, last_heartbeat_ip, last_resolved_ip, "
-    "last_site_ok_at, last_site_latency_ms, last_site_error"
+    "last_site_ok_at, last_site_latency_ms, last_site_error, settings_override"
 )
 
 _MODULE_COLUMNS = (
     "id, website_id, display_name, check_hint, enabled, "
-    "last_ok_at, last_latency_ms, last_error"
+    "last_ok_at, last_latency_ms, last_error, settings_override"
 )
 
 
@@ -1249,6 +1373,7 @@ def _row_to_website(r: aiosqlite.Row | tuple[Any, ...]) -> dict[str, Any]:
         "last_site_ok_at": r[9],
         "last_site_latency_ms": r[10],
         "last_site_error": r[11],
+        "settings_override": r[12] if len(r) > 12 else None,
     }
 
 
@@ -1262,6 +1387,7 @@ def _row_to_module(r: aiosqlite.Row | tuple[Any, ...]) -> dict[str, Any]:
         "last_ok_at": r[5],
         "last_latency_ms": r[6],
         "last_error": r[7],
+        "settings_override": r[8] if len(r) > 8 else None,
     }
 
 

@@ -32,14 +32,37 @@ META: dict[str, dict[str, str]] = {
     "fail_threshold": {
         "title": "Порог пропусков подряд",
         "body": (
-            "Сколько тиков подряд объект должен быть «плохим», чтобы открыть инцидент и "
-            "отправить алерт: бот без свежего heartbeat, роутер/сайт, а также неуспешный "
-            "пропусков heartbeat у ботов, роутеров и сайтов. Для Telegram API — отдельный "
-            "параметр «Порог сбоев Telegram»."
+            "Сколько тиков подряд объект должен быть «плохим», чтобы открыть инцидент "
+            "(бот, роутер, LAN, сайт, модуль). Сообщение в чат может уйти позже — "
+            "см. «Задержка алерта down». Для глобальной проверки Telegram API — "
+            "отдельный параметр «Порог сбоев Telegram»."
         ),
         "etalon": "2",
         "etalon_hint": "Двух пропусков подряд обычно достаточно.",
         "input": "Целое число, не меньше 1. Пример: 2",
+    },
+    "recover_threshold": {
+        "title": "Порог восстановления подряд",
+        "body": (
+            "Сколько тиков подряд объект должен быть «хорошим», чтобы закрыть инцидент "
+            "и отправить «Восстановлено». Защита от дребезга при флапе. "
+            "Аналог «Порога восстановления Telegram» для ботов, сайтов и роутеров."
+        ),
+        "etalon": "2",
+        "etalon_hint": "2 успешных тика подряд — разумный минимум.",
+        "input": "Целое число, не меньше 1. Пример: 2",
+    },
+    "down_alert_sec": {
+        "title": "Задержка алерта down (секунды)",
+        "body": (
+            "Сколько секунд с начала устойчивого сбоя ждать перед первым сообщением "
+            "«Недоступен» в Telegram. Краткие обрывы — без алерта. "
+            "0 — алерт сразу после порога пропусков. "
+            "Аналог «Задержки алерта Telegram» для каждого устройства."
+        ),
+        "etalon": "0",
+        "etalon_hint": "Для нестабильных модулей на сайте попробуйте 300–600.",
+        "input": "Целое число секунд, 0 или больше. Пример: 600",
     },
     "repeat_alert_interval_sec": {
         "title": "Повтор алерта, пока бот down (секунды)",
@@ -55,8 +78,9 @@ META: dict[str, dict[str, str]] = {
     "slow_ms": {
         "title": "Порог «медленного» ответа (миллисекунды)",
         "body": (
-            "Если зонд успешен, но ответ дольше этого времени — в статусе/логе видно медленную проверку. "
-            "Отдельных алертов в Telegram по этому поводу нет. 0 — функция выключена."
+            "Если объект «жив» (ok), но задержка больше порога — статус «медленно» и "
+            "отдельный алерт «Медленный ответ» (те же пороги fail/recover/down delay). "
+            "0 — функция выключена."
         ),
         "etalon": "0",
         "etalon_hint": "0 = не отслеживать скорость. Если нужно — попробуйте 3000–8000 мс.",
@@ -112,6 +136,16 @@ META: dict[str, dict[str, str]] = {
         "etalon": "15",
         "etalon_hint": "15 минут — достаточно, чтобы сканер устал и ушёл; не слишком долго для случайного ошибшегося.",
         "input": "Целое число минут, от 1 до 1440. Пример: 15",
+    },
+    "telegram_api_recover_threshold": {
+        "title": "Порог восстановления Telegram API",
+        "body": (
+            "Сколько успешных getMe подряд нужно, чтобы закрыть инцидент Telegram API "
+            "и отправить «Восстановлено» (только если ранее был алерт о падении)."
+        ),
+        "etalon": "2",
+        "etalon_hint": "2 — как у общего recover_threshold.",
+        "input": "Целое число, не меньше 1. Пример: 2",
     },
     "telegram_api_fail_threshold": {
         "title": "Порог сбоев Telegram API подряд",
@@ -216,6 +250,83 @@ META: dict[str, dict[str, str]] = {
     },
 }
 
+SETTINGS_GROUPS: dict[str, dict[str, str]] = {
+    "monitor": {
+        "title": "Мониторинг и алерты",
+        "emoji": "📡",
+    },
+    "notify": {
+        "title": "Уведомления",
+        "emoji": "🔔",
+    },
+    "telegram": {
+        "title": "Telegram API",
+        "emoji": "☁️",
+    },
+    "heartbeat_srv": {
+        "title": "Heartbeat-сервер",
+        "emoji": "💓",
+    },
+    "disk": {
+        "title": "Диск и сервис",
+        "emoji": "💾",
+    },
+}
+
+SETTINGS_GROUP_KEYS: dict[str, list[str]] = {
+    "monitor": [
+        "check_interval_sec",
+        "heartbeat_timeout_sec",
+        "fail_threshold",
+        "recover_threshold",
+        "down_alert_sec",
+        "repeat_alert_interval_sec",
+        "slow_ms",
+        "request_timeout_sec",
+    ],
+    "notify": ["quiet_hours", "daily_excel_report_enabled"],
+    "telegram": [
+        "telegram_api_probe_enabled",
+        "telegram_api_check_interval_sec",
+        "telegram_api_fail_threshold",
+        "telegram_api_recover_threshold",
+        "telegram_api_down_alert_sec",
+    ],
+    "heartbeat_srv": [
+        "heartbeat_unauth_rate_per_min",
+        "heartbeat_ban_fails_threshold",
+        "heartbeat_ban_duration_min",
+    ],
+    "disk": ["disk_usage_threshold_pct", "disk_check_interval_sec"],
+}
+
+ENTITY_SETTINGS_GROUPS: dict[str, list[str]] = {
+    "monitor": [
+        "heartbeat_timeout_sec",
+        "fail_threshold",
+        "recover_threshold",
+        "down_alert_sec",
+        "repeat_alert_interval_sec",
+        "slow_ms",
+    ],
+    "notify": ["quiet_hours"],
+}
+
+ENTITY_KIND_LABELS: dict[str, str] = {
+    "bot": "бот",
+    "router": "роутер",
+    "target": "устройство LAN",
+    "website": "сайт",
+    "module": "модуль",
+}
+
+
+def setting_button_label(key: str) -> str:
+    m = META.get(key, {})
+    title = m.get("title", key)
+    short = title.split("(")[0].strip()[:28]
+    return short or key
+
 
 async def _raw_value(db: Database, key: str) -> str:
     row = await queries.get_setting(db, key)
@@ -252,6 +363,42 @@ async def format_key_change_prompt(db: Database, key: str) -> str:
         "",
         f"Эталон (рекомендуется): {et_disp}",
         f"Сейчас в базе: {cur_disp}",
+        "",
+        "Что ввести:",
+        m["input"],
+        "",
+        "Отправьте следующим сообщением новое значение.",
+    ]
+    return "\n".join(parts)
+
+
+async def format_entity_key_change_prompt(
+    db: Database,
+    kind: str,
+    entity_id: int,
+    key: str,
+) -> str:
+    global_parsed = await queries.load_all_settings(db)
+    override = await queries.get_entity_settings_override(db, kind, entity_id)
+    eff = queries.resolve_monitor_settings(global_parsed, json.dumps(override) if override else None)
+    m = META[key]
+    if key == "quiet_hours":
+        cur_disp = _pretty_quiet(json.dumps(eff.quiet_hours, ensure_ascii=False))
+        global_raw = await _raw_value(db, key)
+        et_disp = _pretty_quiet(global_raw)
+        src = "свои" if key in override else "общие"
+    else:
+        cur_val = getattr(eff, key, None)
+        cur_disp = str(cur_val)
+        et_disp = queries.DEFAULT_SETTINGS.get(key, "")
+        src = "своё" if key in override else "общее (глобальное)"
+    parts = [
+        f"Изменение ({ENTITY_KIND_LABELS.get(kind, kind)} id={entity_id}): {m['title']}",
+        "",
+        m["body"],
+        "",
+        f"Сейчас ({src}): {cur_disp}",
+        f"Глобальный эталон: {et_disp}",
         "",
         "Что ввести:",
         m["input"],

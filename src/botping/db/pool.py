@@ -82,6 +82,21 @@ class Database:
         if missing:
             await self._conn.commit()
 
+        for table in (
+            "monitored_bots",
+            "monitored_routers",
+            "router_targets",
+            "monitored_websites",
+            "website_modules",
+        ):
+            cur = await self._conn.execute(f"PRAGMA table_info({table})")
+            cols = [row[1] for row in await cur.fetchall()]
+            if "settings_override" not in cols:
+                await self._conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN settings_override TEXT"
+                )
+        await self._conn.commit()
+
         await self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS monitored_routers (

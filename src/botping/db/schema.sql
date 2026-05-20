@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS monitored_bots (
     heartbeat_secret TEXT,
     -- Время последнего принятого пинга (Москва) и IP источника.
     last_heartbeat_at TEXT,
-    last_heartbeat_ip TEXT
+    last_heartbeat_ip TEXT,
+    settings_override TEXT
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -84,7 +85,8 @@ CREATE TABLE IF NOT EXISTS monitored_routers (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     heartbeat_secret TEXT NOT NULL UNIQUE,
     last_heartbeat_at TEXT,
-    last_heartbeat_ip TEXT
+    last_heartbeat_ip TEXT,
+    settings_override TEXT
 );
 
 CREATE TABLE IF NOT EXISTS router_targets (
@@ -96,6 +98,7 @@ CREATE TABLE IF NOT EXISTS router_targets (
     last_ok_at TEXT,
     last_latency_ms INTEGER,
     last_error TEXT,
+    settings_override TEXT,
     UNIQUE(router_id, address)
 );
 
@@ -161,6 +164,7 @@ CREATE TABLE IF NOT EXISTS monitored_websites (
     last_site_ok_at TEXT,
     last_site_latency_ms INTEGER,
     last_site_error TEXT,
+    settings_override TEXT,
     UNIQUE(host)
 );
 
@@ -173,6 +177,7 @@ CREATE TABLE IF NOT EXISTS website_modules (
     last_ok_at TEXT,
     last_latency_ms INTEGER,
     last_error TEXT,
+    settings_override TEXT,
     UNIQUE(website_id, display_name)
 );
 

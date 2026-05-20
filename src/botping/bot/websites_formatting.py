@@ -14,10 +14,12 @@ WEBSITES_MENU_INTRO = (
 )
 
 
-def module_status_line(m: dict, hb_timeout: int) -> str:
-    alive, err = _module_alive(m, hb_timeout)
+def module_status_line(m: dict, hb_timeout: int, slow_ms: int = 0) -> str:
+    alive, err, lat = _module_alive(m, hb_timeout)
     if alive:
-        ms = m.get("last_latency_ms")
+        ms = m.get("last_latency_ms") if m.get("last_latency_ms") is not None else lat
+        if slow_ms > 0 and ms is not None and int(ms) > slow_ms:
+            return f"🐢 медленно, {ms} ms"
         return f"🟢 жив{f', {ms} ms' if ms is not None else ''}"
     return f"🔴 нет ({err or '?'})"
 

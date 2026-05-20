@@ -15,7 +15,13 @@ from botping.bot.formatting import (
     mask_token,
     public_host_from_env,
 )
-from botping.bot.settings_help import META, format_key_change_prompt
+from botping.bot.settings_help import (
+    ENTITY_KIND_LABELS,
+    META,
+    SETTINGS_GROUPS,
+    format_entity_key_change_prompt,
+    format_key_change_prompt,
+)
 from botping.bot.sites_formatting import (
     ROUTERS_MENU_INTRO,
     build_router_menu_rows,
@@ -64,6 +70,15 @@ async def render_screen(
         return ui.HELP_TEXT, kb.back_to_main_keyboard()
     if screen_key == "settings":
         return ui.SETTINGS_INTRO, kb.settings_menu()
+    if screen_key.startswith("setgrp:"):
+        gid = screen_key.split(":", 1)[1]
+        g = SETTINGS_GROUPS.get(gid, {"title": gid, "emoji": "⚙️"})
+        text = (
+            f"{g.get('emoji', '⚙️')} <b>{g.get('title', gid)}</b>\n\n"
+            "Выберите параметр. Значения по умолчанию для всех объектов "
+            "без своих настроек."
+        )
+        return text, kb.settings_group_menu(gid)
     if screen_key == "bots":
         rows = await queries.list_monitored_bots(db)
         bot_rows = [(int(b["id"]), str(b["display_name"]), bool(b["enabled"])) for b in rows]
@@ -115,6 +130,8 @@ async def render_screen(
         if len(prompt) > 4000:
             prompt = prompt[:3990] + "…"
         return f"⚙️ <b>{META[key].get('title', key)}</b>\n\n{prompt}", kb.setting_input_keyboard()
+    if screen_key.startswith("eset:"):
+        return await _render_entity_settings_screen(db, screen_key)
     if screen_key.startswith("bot_del:"):
         bid = int(screen_key.split(":")[1])
         b = await queries.get_monitored_bot(db, bid)
@@ -308,7 +325,8 @@ async def _render_bot_detail(db: Database, bid: int) -> tuple[str, InlineKeyboar
     if not b:
         return "❌ Бот не найден", kb.back_to_main_keyboard()
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
+    eff = queries.effective_monitor_for_entity(settings, b)
+    hb_timeout = eff.heartbeat_timeout_sec
     age = heartbeat_age_sec(b)
     if age is None:
         hb_state = "⚪ нет пингов"
@@ -327,7 +345,10 @@ async def _render_bot_detail(db: Database, bid: int) -> tuple[str, InlineKeyboar
         f"🔐 Секрет: {mask_secret(str(b['heartbeat_secret']))}\n"
         f"🔗 {public_host_from_env()}/heartbeat"
     )
-    return text, kb.bot_detail(bid, bool(b["enabled"]))
+    ov = queries.count_override_keys(b.get("settings_override"))
+    settings_line = f"⚙️ Настройки: {'свои (' + str(ov) + ')' if ov else 'общие'}"
+    text += f"\n{settings_line}"
+    return text, kb.bot_detail(bid, bool(b["enabled"]), ov)
 
 
 async def _render_router_detail(db: Database, rid: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -339,7 +360,8 @@ async def _render_router_detail(db: Database, rid: int) -> tuple[str, InlineKeyb
     settings = await queries.load_all_settings(db)
     hb_timeout = int(settings["heartbeat_timeout_sec"])
     target_btns = await target_buttons_for_router(db, rid, hb_timeout)
-    return text, kb.router_detail(rid, bool(r["enabled"]), target_btns)
+    ov = queries.count_override_keys(r.get("settings_override"))
+    return text, kb.router_detail(rid, bool(r["enabled"]), target_btns, ov)
 
 
 async def _render_website_detail(db: Database, wid: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -360,15 +382,17 @@ async def _render_webmod_detail(db: Database, mid: int) -> tuple[str, InlineKeyb
         return "❌ Не найдено", kb.back_to_main_keyboard()
     wid = int(m["website_id"])
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
+    meff = queries.effective_monitor_for_entity(settings, m)
     en = "✅ вкл" if m["enabled"] else "⏸ выкл"
     hint = m.get("check_hint") or "—"
+    ov = queries.count_override_keys(m.get("settings_override"))
     text = (
         f"📦 <b>{m['display_name']}</b>\n"
         f"id={mid} · website {wid} · {en}\n"
         f"🔗 Проверка: {hint}\n"
-        f"{module_status_line(m, hb_timeout)}\n"
-        f"🕑 Отчёт: {m.get('last_ok_at') or '—'}"
+        f"{module_status_line(m, meff.heartbeat_timeout_sec, meff.slow_ms)}\n"
+        f"🕑 Отчёт: {m.get('last_ok_at') or '—'}\n"
+        f"⚙️ {'свои (' + str(ov) + ')' if ov else 'общие'}"
     )
     return text, kb.website_module_detail(mid, bool(m["enabled"]))
 
@@ -379,16 +403,83 @@ async def _render_target_detail(db: Database, tid: int) -> tuple[str, InlineKeyb
         return "❌ Не найдено", kb.back_to_main_keyboard()
     rid = int(t["router_id"])
     settings = await queries.load_all_settings(db)
-    hb_timeout = int(settings["heartbeat_timeout_sec"])
+    teff = queries.effective_monitor_for_entity(settings, t)
     en = "✅ вкл" if t["enabled"] else "⏸ выкл"
+    ov = queries.count_override_keys(t.get("settings_override"))
     text = (
         f"📡 <b>{t['display_name']}</b>\n"
         f"id={tid} · router {rid} · {en}\n"
         f"📍 {t['address']}\n"
-        f"{target_status_line(t, hb_timeout)}\n"
-        f"🕑 Отчёт: {t.get('last_ok_at') or '—'}"
+        f"{target_status_line(t, teff.heartbeat_timeout_sec)}\n"
+        f"🕑 Отчёт: {t.get('last_ok_at') or '—'}\n"
+        f"⚙️ {'свои (' + str(ov) + ')' if ov else 'общие'}"
     )
     return text, kb.site_target_detail(tid, rid, bool(t["enabled"]))
+
+
+async def _render_entity_settings_screen(
+    db: Database, screen_key: str
+) -> tuple[str, InlineKeyboardMarkup]:
+    parts = screen_key.split(":")
+    action = parts[1]
+    if action == "home":
+        kind, eid = parts[2], int(parts[3])
+        row = await get_entity_display_name(db, kind, eid)
+        if row is None:
+            return "❌ Объект не найден", kb.back_to_main_keyboard()
+        entity = await _fetch_entity_row(db, kind, eid)
+        ov = queries.count_override_keys(entity.get("settings_override") if entity else None)
+        label = ENTITY_KIND_LABELS.get(kind, kind)
+        text = (
+            f"⚙️ <b>Настройки</b> · {label}\n"
+            f"<b>{row}</b> (id={eid})\n\n"
+            f"{'Свои параметры: ' + str(ov) if ov else 'Используются общие настройки из меню «Настройки».'}\n"
+            "Переопределённые значения не меняют глобальные."
+        )
+        return text, kb.entity_settings_menu(kind, eid, ov)
+    if action == "grp":
+        gid, kind, eid = parts[2], parts[3], int(parts[4])
+        entity = await _fetch_entity_row(db, kind, eid)
+        if not entity:
+            return "❌ Объект не найден", kb.back_to_main_keyboard()
+        override = await queries.get_entity_settings_override(db, kind, eid)
+        gtitle = "Мониторинг и алерты" if gid == "monitor" else "Уведомления"
+        text = f"⚙️ <b>{gtitle}</b> · id={eid}\n\n✎ — своё значение"
+        return text, kb.entity_settings_group_menu(kind, eid, gid, set(override.keys()))
+    if action == "key":
+        key, kind, eid = parts[2], parts[3], int(parts[4])
+        override = await queries.get_entity_settings_override(db, kind, eid)
+        prompt = await format_entity_key_change_prompt(db, kind, eid, key)
+        if len(prompt) > 4000:
+            prompt = prompt[:3990] + "…"
+        return (
+            f"⚙️ <b>{META[key].get('title', key)}</b>\n\n{prompt}",
+            kb.entity_setting_detail_keyboard(kind, eid, key, key in override),
+        )
+    if action == "edit":
+        key, kind, eid = parts[2], parts[3], int(parts[4])
+        prompt = await format_entity_key_change_prompt(db, kind, eid, key)
+        if len(prompt) > 4000:
+            prompt = prompt[:3990] + "…"
+        return (
+            f"⚙️ <b>{META[key].get('title', key)}</b>\n\n{prompt}",
+            kb.entity_setting_input_keyboard(kind, eid, key),
+        )
+    return "❌ Неизвестный экран", kb.back_to_main_keyboard()
+
+
+async def _fetch_entity_row(db: Database, kind: str, entity_id: int) -> dict | None:
+    if kind == "bot":
+        return await queries.get_monitored_bot(db, entity_id)
+    if kind == "router":
+        return await queries.get_monitored_router(db, entity_id)
+    if kind == "target":
+        return await queries.get_router_target(db, entity_id)
+    if kind == "website":
+        return await queries.get_monitored_website(db, entity_id)
+    if kind == "module":
+        return await queries.get_website_module(db, entity_id)
+    return None
 
 
 async def goto_screen_cq(
