@@ -430,11 +430,16 @@ async def _render_entity_settings_screen(
         entity = await _fetch_entity_row(db, kind, eid)
         ov = queries.count_override_keys(entity.get("settings_override") if entity else None)
         label = ENTITY_KIND_LABELS.get(kind, kind)
+        if ov:
+            mode_line = f"Сейчас задано <b>своих</b> параметров: {ov}."
+        else:
+            mode_line = "Сейчас действуют только <b>глобальные</b> настройки (меню «Настройки»)."
         text = (
             f"⚙️ <b>Настройки</b> · {label}\n"
             f"<b>{row}</b> (id={eid})\n\n"
-            f"{'Свои параметры: ' + str(ov) if ov else 'Используются общие настройки из меню «Настройки».'}\n"
-            "Переопределённые значения не меняют глобальные."
+            f"{mode_line}\n"
+            "«Глобальные настройки» — дефолты для всех объектов.\n"
+            "«Мониторинг» / «Уведомления» — только для этого объекта."
         )
         return text, kb.entity_settings_menu(kind, eid, ov)
     if action == "grp":

@@ -131,12 +131,11 @@ def settings_group_menu(group_id: str) -> InlineKeyboardMarkup:
 
 
 def entity_settings_menu(kind: str, entity_id: int, override_count: int) -> InlineKeyboardMarkup:
-    hint = f"Свои: {override_count}" if override_count else "Общие настройки"
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text=f"⚙️ {hint}",
-                callback_data=f"eset:home:{kind}:{entity_id}",
+                text="🌐 Глобальные настройки (дефолты)",
+                callback_data="menu:settings",
             )
         ],
         [
