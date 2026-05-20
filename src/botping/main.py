@@ -6,9 +6,12 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from aiogram.exceptions import TelegramNetworkError
+
 from botping.bot.commands import BOT_COMMANDS, register_bot_commands
 from botping.bot.handlers import setup_router
 from botping.bot.middlewares import AdminChatMiddleware, DbMiddleware
+from botping.bot.telegram_connect import wait_for_telegram_api
 from botping.config import load_settings
 from botping.db import queries
 from botping.db.pool import Database, set_database
@@ -34,15 +37,19 @@ async def _amain() -> None:
     logger.info("Загружено admin_chat_ids: %s шт.", len(settings.admin_chat_ids))
 
     bot = Bot(settings.admin_bot_token)
-    if await register_bot_commands(bot, admin_chat_ids=settings.admin_chat_ids):
-        logger.info(
-            "Команды Telegram зарегистрированы (%d шт., menu button для %d чатов)",
-            len(BOT_COMMANDS),
-            len(settings.admin_chat_ids),
-        )
-    else:
-        logger.warning("Бот запущен без меню команд в Telegram")
     dp = Dispatcher(storage=MemoryStorage())
+
+    async def _register_commands_background() -> None:
+        if await register_bot_commands(bot, admin_chat_ids=settings.admin_chat_ids):
+            logger.info(
+                "Команды Telegram зарегистрированы (%d шт., menu button для %d чатов)",
+                len(BOT_COMMANDS),
+                len(settings.admin_chat_ids),
+            )
+        else:
+            logger.warning(
+                "Меню команд не зарегистрировано (сеть/Telegram); /start всё равно работает"
+            )
 
     async def notify(text: str) -> None:
         for chat_id in settings.admin_chat_ids:
@@ -66,9 +73,34 @@ async def _amain() -> None:
     dp.callback_query.outer_middleware(DbMiddleware(db))
     dp.include_router(setup_router())
 
+    cmd_task = asyncio.create_task(_register_commands_background(), name="register-commands")
+
+    poll_retry_sec = 30
     try:
-        await dp.start_polling(bot, hb_server=hb_server)
+        while True:
+            if not await wait_for_telegram_api(bot):
+                logger.error(
+                    "Ожидание Telegram API, повтор через %d с (бот не падает)",
+                    poll_retry_sec,
+                )
+                await asyncio.sleep(poll_retry_sec)
+                continue
+            try:
+                await dp.start_polling(bot, hb_server=hb_server)
+                break
+            except TelegramNetworkError as e:
+                logger.error(
+                    "Polling оборван (%s), переподключение через %d с",
+                    e,
+                    poll_retry_sec,
+                )
+                await asyncio.sleep(poll_retry_sec)
     finally:
+        cmd_task.cancel()
+        try:
+            await cmd_task
+        except asyncio.CancelledError:
+            pass
         stop.set()
         sched_task.cancel()
         daily_task.cancel()
