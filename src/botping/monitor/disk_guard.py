@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 
 from botping.db import queries
 from botping.db.pool import Database
+from botping.monitor.alert_messages import alert_disk
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +73,11 @@ async def _run_cleanup(
     total_deleted_audit = 0
 
     await notify(
-        f"Диск заполнен на {info.used_pct:.1f}% "
-        f"({info.used_gb:.1f} / {info.total_gb:.1f} ГБ). "
-        f"Порог {threshold}% — запускаю очистку старых данных..."
+        alert_disk(
+            f"Диск заполнен на {info.used_pct:.1f}% "
+            f"({info.used_gb:.1f} / {info.total_gb:.1f} ГБ). "
+            f"Порог {threshold}% — запускаю очистку старых данных..."
+        )
     )
 
     while info.used_pct > target:
@@ -121,14 +124,18 @@ async def _run_cleanup(
 
     if parts:
         await notify(
-            f"Очистка завершена. Удалено: {', '.join(parts)}. "
-            f"Диск: {info.used_pct:.1f}% ({info.free_gb:.1f} ГБ свободно)."
+            alert_disk(
+                f"Очистка завершена. Удалено: {', '.join(parts)}. "
+                f"Диск: {info.used_pct:.1f}% ({info.free_gb:.1f} ГБ свободно)."
+            )
         )
     else:
         await notify(
-            f"Нечего удалять (таблицы пусты), но диск всё ещё заполнен "
-            f"на {info.used_pct:.1f}%. Проверьте вручную — место занимает "
-            f"что-то за пределами БД бота."
+            alert_disk(
+                f"Нечего удалять (таблицы пусты), но диск всё ещё заполнен "
+                f"на {info.used_pct:.1f}%. Проверьте вручную — место занимает "
+                f"что-то за пределами БД бота."
+            )
         )
 
 

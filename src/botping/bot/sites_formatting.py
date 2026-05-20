@@ -17,7 +17,7 @@ ROUTERS_MENU_INTRO = (
 
 
 def target_status_line(t: dict, hb_timeout: int) -> str:
-    alive, err = _target_alive(t, hb_timeout)
+    alive, err, _ = _target_alive(t, hb_timeout)
     if alive:
         ms = t.get("last_latency_ms")
         return f"🟢 жив{f', {ms} ms' if ms is not None else ''}"

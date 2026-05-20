@@ -7,6 +7,13 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from botping.db.monitor_settings import EffectiveMonitorSettings
+from botping.monitor.alert_messages import (
+    alert_down,
+    alert_down_repeat,
+    alert_recover,
+    alert_slow,
+    alert_slow_ok,
+)
 from botping.monitor.quiet import in_quiet_hours
 from botping.monitor.util import NotifyFn, parse_sqlite_ts
 from botping.timeutil import MOSCOW_TZ
@@ -113,10 +120,14 @@ async def process_entity_tick(
                         else eff.repeat_alert_interval_sec + 1
                     )
                     if open_inc.get("last_alert_at") and elapsed >= eff.repeat_alert_interval_sec:
-                        await notify(f"{down_repeat_prefix}: {label}. {err_text}")
+                        await notify(
+                            alert_down_repeat(f"{down_repeat_prefix}: {label}. {err_text}")
+                        )
                         await touch_incident_alert(iid)
                     elif not open_inc.get("last_alert_at"):
-                        await notify(f"{down_repeat_prefix}: {label}. {err_text}")
+                        await notify(
+                            alert_down_repeat(f"{down_repeat_prefix}: {label}. {err_text}")
+                        )
                         await touch_incident_alert(iid)
                 elif not open_inc.get("last_alert_at"):
                     logger.info("Down alert suppressed (quiet hours): %s", label)
@@ -126,7 +137,7 @@ async def process_entity_tick(
             assert open_inc is not None
             if _should_notify_down(state, open_inc, eff.down_alert_sec):
                 if not quiet_down:
-                    await notify(f"{down_prefix}: {label}. {err_text}")
+                    await notify(alert_down(f"{down_prefix}: {label}. {err_text}"))
                     await touch_incident_alert(iid)
                 else:
                     logger.info("Incident opened during quiet hours: %s", label)
@@ -154,7 +165,7 @@ async def process_entity_tick(
             msg = f"Восстановлено: {label}"
             if recover_suffix:
                 msg += f" {recover_suffix}"
-            await notify(msg)
+            await notify(alert_recover(msg))
         elif alerted:
             logger.info("Recovery during quiet hours: %s", label)
 
@@ -172,7 +183,9 @@ async def process_entity_tick(
             if _should_notify_slow(state, eff) and not quiet_down:
                 ms = latency_ms if latency_ms is not None else 0
                 await notify(
-                    f"Медленный ответ: {label}. {ms} ms (порог {eff.slow_ms} ms)"
+                    alert_slow(
+                        f"Медленный ответ: {label}. {ms} ms (порог {eff.slow_ms} ms)"
+                    )
                 )
                 state.slow_last_alert_mono = now_mono
     elif slow_enabled:
@@ -181,7 +194,7 @@ async def process_entity_tick(
         state.consecutive_slow_ok += 1
         if state.slow_open and state.consecutive_slow_ok >= eff.recover_threshold:
             if not quiet_down:
-                await notify(f"Пинг нормализовался: {label}")
+                await notify(alert_slow_ok(f"Пинг нормализовался: {label}"))
             state.slow_open = False
             state.slow_last_alert_mono = 0.0
             state.consecutive_slow_ok = 0

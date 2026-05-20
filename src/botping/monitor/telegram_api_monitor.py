@@ -9,6 +9,11 @@ import httpx
 
 from botping.db import queries
 from botping.db.pool import Database
+from botping.monitor.alert_messages import (
+    alert_down_repeat,
+    alert_recover,
+    alert_telegram_down,
+)
 from botping.monitor.checker import probe_getme_api
 from botping.monitor.util import NotifyFn, parse_sqlite_ts
 from botping.timeutil import MOSCOW_TZ
@@ -80,7 +85,11 @@ async def run_telegram_api_probe_tick(
             await queries.close_telegram_incident(db, iid)
             state.consecutive_ok = 0
             if alerted and not quiet_down:
-                await notify("Восстановлено: Telegram API снова доступен (getMe ok).")
+                await notify(
+                    alert_recover(
+                        "Восстановлено: Telegram API снова доступен (getMe ok)."
+                    )
+                )
             elif alerted:
                 logger.info("Telegram API recovered during quiet hours (alert suppressed)")
             else:
@@ -107,11 +116,15 @@ async def run_telegram_api_probe_tick(
                     )
                     if elapsed >= repeat_sec:
                         await notify(
-                            f"Telegram API всё ещё недоступен. Ошибка: {err}"
+                            alert_down_repeat(
+                                f"Telegram API всё ещё недоступен. Ошибка: {err}"
+                            )
                         )
                         await queries.touch_telegram_incident_alert(db, iid)
                 else:
-                    await notify(f"Telegram API недоступен. Ошибка: {err}")
+                    await notify(
+                        alert_telegram_down(f"Telegram API недоступен. Ошибка: {err}")
+                    )
                     await queries.touch_telegram_incident_alert(db, iid)
             elif not open_inc.get("last_alert_at"):
                 logger.info(
@@ -141,7 +154,9 @@ async def run_telegram_api_probe_tick(
     assert open_inc is not None
     if _should_notify_down(state, open_inc, down_alert_sec):
         if not quiet_down:
-            await notify(f"Telegram API недоступен. Ошибка: {err}")
+            await notify(
+                alert_telegram_down(f"Telegram API недоступен. Ошибка: {err}")
+            )
             await queries.touch_telegram_incident_alert(db, iid)
         else:
             logger.info(

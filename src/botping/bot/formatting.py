@@ -177,7 +177,7 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
                 tid = int(t["id"])
                 t_inc = await queries.get_open_router_target_incident(db, tid)
                 t_inc_s = " 🚨" if t_inc else ""
-                alive, terr = _target_alive(t, hb_timeout)
+                alive, terr, _ = _target_alive(t, hb_timeout)
                 if alive:
                     ms = t.get("last_latency_ms")
                     t_st = f"🟢 {ms} ms" if ms is not None else "🟢 жив"
@@ -214,7 +214,7 @@ async def format_status(db: Database, hb_server: HeartbeatServer | None = None) 
                 mid = int(m["id"])
                 m_inc = await queries.get_open_website_module_incident(db, mid)
                 m_inc_s = " 🚨" if m_inc else ""
-                alive, merr = _module_alive(m, hb_timeout)
+                alive, merr, _ = _module_alive(m, hb_timeout)
                 if alive:
                     ms = m.get("last_latency_ms")
                     m_st = f"🟢 {ms} ms" if ms is not None else "🟢 жив"
